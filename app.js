@@ -81,49 +81,51 @@ const parseTimeToMinutes = (timeStr) => {
     return h * 60 + m;
 };
 
-// Auto Overtime Calculation engine according to specific rules for type "E" employees
+// Auto Overtime & Deduction Calculation engine according to specific rules for type "E" employees
 const calculateAutoOT = (inTimeStr, outTimeStr) => {
     let otPoints = 0;
     
     // In-Time Rules
     const inMins = parseTimeToMinutes(inTimeStr);
     if (inMins !== null) {
-        // 8:25 AM to 8:40 AM -> Allot 0.5 points OT
-        if (inMins >= 505 && inMins <= 520) {
+        // In-Time Overtime (Early Arrival)
+        if (inMins >= 505 && inMins <= 520) { // 8:25 AM to 8:40 AM
             otPoints += 0.5;
-        }
-        // 7:50 AM to 8:24 AM (or earlier) -> Allot 1.0 point OT
-        else if (inMins >= 360 && inMins <= 504) { // Checked up to 6:00 AM range
+        } else if (inMins < 505 && inMins >= 360) { // Earlier than 8:25 AM (down to 6:00 AM)
             otPoints += 1.0;
+        }
+        // In-Time Penalty (Late Arrival)
+        else if (inMins >= 551 && inMins <= 584) { // 9:11 AM to 9:44 AM (comes after 9:10 to 9:44)
+            otPoints -= 0.5;
+        } else if (inMins >= 585 && inMins <= 610) { // 9:45 AM to 10:10 AM
+            otPoints -= 1.0;
         }
     }
 
     // Out-Time Rules
     const outMins = parseTimeToMinutes(outTimeStr);
     if (outMins !== null) {
-        // 5:45 PM to 6:14 PM -> Allot 0.5 points additional OT
-        if (outMins >= 1065 && outMins <= 1094) {
+        // Out-Time Overtime (Late Departure)
+        if (outMins >= 1065 && outMins <= 1094) { // 5:45 PM to 6:14 PM
             otPoints += 0.5;
-        }
-        // 6:15 PM to 6:45 PM -> Allot 1.0 point additional OT
-        else if (outMins >= 1095 && outMins <= 1125) {
+        } else if (outMins >= 1095 && outMins <= 1125) { // 6:15 PM to 6:45 PM
             otPoints += 1.0;
-        }
-        // 6:46 PM to 7:15 PM -> Allot 1.5 points additional OT
-        else if (outMins >= 1126 && outMins <= 1155) {
+        } else if (outMins >= 1126 && outMins <= 1155) { // 6:46 PM to 7:15 PM
             otPoints += 1.5;
-        }
-        // 7:16 PM to 7:45 PM -> Allot 2.0 points additional OT
-        else if (outMins >= 1156 && outMins <= 1185) {
+        } else if (outMins >= 1156) { // 7:16 PM onwards
             otPoints += 2.0;
         }
-        // Past 7:45 PM -> Cap or preserve 2.0 points of Out-Time OT
-        else if (outMins > 1185) {
-            otPoints += 2.0;
+        // Out-Time Penalty (Early Departure)
+        else if (outMins >= 1005 && outMins <= 1040) { // 4:45 PM to 5:20 PM
+            otPoints -= 0.5;
+        } else if (outMins >= 976 && outMins <= 1004) { // 4:16 PM to 4:44 PM
+            otPoints -= 1.0;
+        } else if (outMins >= 955 && outMins <= 975) { // 3:55 PM to 4:15 PM
+            otPoints -= 1.5;
         }
     }
 
-    return otPoints > 0 ? otPoints : "";
+    return otPoints !== 0 ? otPoints : "";
 };
 
 // Time Options Generators
@@ -181,7 +183,7 @@ const compute = (emp, monthConf) => {
         
         let o = String(emp[`ot${i}`] || "").trim();
 
-        // On-the-fly dynamic automatic OT logic for E-type workers if not manually overwritten
+        // On-the-fly dynamic automatic OT/Deduction logic for E-type workers if not manually overwritten
         if (isE && o === "" && emp[`in${i}`] && emp[`out${i}`]) {
             const computedOt = calculateAutoOT(emp[`in${i}`], emp[`out${i}`]);
             if (computedOt !== "") {
@@ -230,12 +232,6 @@ const defaultEmp = (monthConf) => {
     for (let i = 1; i <= monthConf.days; i++) { e[`d${i}`] = ""; e[`ot${i}`] = ""; e[`c${i}`] = ""; e[`in${i}`] = ""; e[`out${i}`] = ""; }
     return compute(e, monthConf);
 };
-
-const Icon = ({ path, className="w-5 h-5" }) => (
-<svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style={{ width: '1.1rem', height: '1.1rem', display: 'inline-block' }}>
-<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={path}></path>
-</svg>
-);
 
 const OwnerDashboard = ({ db, activeConf }) => {
     const stats = useMemo(() => {
