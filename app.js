@@ -10,7 +10,7 @@ const IDB_DB_NAME = "arise_directory_db_v1";
 const IDB_STORE_NAME = "handles";
 const IDB_KEY = "folder_sync_handle";
 
-// IndexedDB Helper utilities
+// IndexedDB Helper utilities to persist directory handles across page refreshes securely
 const saveHandleToIDB = async (handle) => {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open(IDB_DB_NAME, 1);
@@ -84,7 +84,7 @@ const generateTimeOptions = (startHr, startMin, endHr, endMin) => {
     return times;
 };
 
-// Expanded time options to cover the new early/late OT rules
+// Broadened time options to cover the new early/late OT rules
 const inTimeOptions = generateTimeOptions(7, 30, 11, 0); // 7:30 AM to 11:00 AM
 const outTimeOptions = generateTimeOptions(15, 30, 21, 0); // 3:30 PM to 9:00 PM
 
@@ -100,7 +100,7 @@ const formatTimeInput = (time24) => {
     return `${h}:${m} ${ampm}`;
 };
 
-// --- AUTO OT CALCULATION LOGIC ---
+// --- AUTO OT & PENALTY CALCULATION SYSTEM ---
 const parseTimeMins = (timeStr) => {
     if (!timeStr) return null;
     const [time, modifier] = timeStr.split(' ');
@@ -116,41 +116,44 @@ const calculateAutoOT = (inStr, outStr) => {
     const outMins = parseTimeMins(outStr);
     let ot = 0;
 
-    // IN TIME Rules
+    // IN TIME Rules (Shift 9:00 AM)
     if (inMins !== null) {
-        if (inMins >= 470 && inMins <= 504) ot += 1.0;       // 07:50 - 08:24
-        else if (inMins >= 505 && inMins <= 520) ot += 0.5;  // 08:25 - 08:40
-        else if (inMins >= 551 && inMins <= 584) ot -= 0.5;  // 09:11 - 09:44
-        else if (inMins >= 585 && inMins <= 610) ot -= 1.0;  // 09:45 - 10:10
+        if (inMins >= 470 && inMins <= 504) ot += 1.0;       // 07:50 - 08:24 (+1 hr)
+        else if (inMins >= 505 && inMins <= 520) ot += 0.5;  // 08:25 - 08:40 (+0.5 hr)
+        else if (inMins >= 551 && inMins <= 584) ot -= 0.5;  // 09:11 - 09:44 (-0.5 hr Penalty)
+        else if (inMins >= 585 && inMins <= 610) ot -= 1.0;  // 09:45 - 10:10 (-1 hr Penalty)
     }
 
-    // OUT TIME Rules
+    // OUT TIME Rules (Shift 5:30 PM)
     if (outMins !== null) {
-        if (outMins >= 955 && outMins <= 975) ot -= 1.5;       // 15:55 - 16:15 (Early Penalty)
-        else if (outMins >= 976 && outMins <= 1004) ot -= 1.0; // 16:16 - 16:44 (Early Penalty)
-        else if (outMins >= 1005 && outMins <= 1040) ot -= 0.5;// 16:45 - 17:20 (Early Penalty)
-        else if (outMins >= 1065 && outMins <= 1094) ot += 0.5;// 17:45 - 18:14 (OT)
-        else if (outMins >= 1095 && outMins <= 1125) ot += 1.0;// 18:15 - 18:45 (OT)
-        else if (outMins >= 1126 && outMins <= 1155) ot += 1.5;// 18:46 - 19:15 (OT)
-        else if (outMins >= 1156 && outMins <= 1185) ot += 2.0;// 19:16 - 19:45 (OT)
+        if (outMins >= 955 && outMins <= 975) ot -= 1.5;       // 15:55 - 16:15 (-1.5 hr Penalty)
+        else if (outMins >= 976 && outMins <= 1004) ot -= 1.0; // 16:16 - 16:44 (-1 hr Penalty)
+        else if (outMins >= 1005 && outMins <= 1040) ot -= 0.5;// 16:45 - 17:20 (-0.5 hr Penalty)
+        else if (outMins >= 1065 && outMins <= 1094) ot += 0.5;// 17:45 - 18:14 (+0.5 hr OT)
+        else if (outMins >= 1095 && outMins <= 1125) ot += 1.0;// 18:15 - 18:45 (+1 hr OT)
+        else if (outMins >= 1126 && outMins <= 1155) ot += 1.5;// 18:46 - 19:15 (+1.5 hr OT)
+        else if (outMins >= 1156 && outMins <= 1185) ot += 2.0;// 19:16 - 19:45 (+2 hr OT)
     }
 
     return ot;
 };
-// ---------------------------------
+// ---------------------------------------------
 
-// Dynamic Computation
+// Dynamic Computation based on selected Month Configuration
 const compute = (emp, monthConf) => {
     let pr = 0, pOnly = 0, ab = 0, ot = 0, t = 0, wo = 0, h = 0, pMiss = 0, leave = 0;
     let autoWoDays = {};
     const isE = String(emp.type || "").trim().toUpperCase() === "E";
     const { days, weekends } = monthConf;
 
+    // Create a working copy of the employee to apply automatic retro-calculations safely
+    const computedEmp = { ...emp };
+
     for (let w of weekends) {
-        if (!emp[`d${w}`]) {
+        if (!computedEmp[`d${w}`]) {
             let sum = 0;
             for (let i = Math.max(1, w - 6); i < w; i++) {
-                const a = String(emp[`d${i}`] || "").trim().toUpperCase();
+                const a = String(computedEmp[`d${i}`] || "").trim().toUpperCase();
                 if (a === 'P' || a === 'P?' || a === 'T' || a === 'W/O' || a === 'L') sum += 1;
                 if (a === '0.5' || a === 'H') sum += 0.5;
             }
@@ -159,10 +162,21 @@ const compute = (emp, monthConf) => {
     }
 
     for (let i = 1; i <= days; i++) {
-        const manual = String(emp[`d${i}`] || "").trim().toUpperCase();
+        // Evaluate Auto OT/Fines Retroactively for 'E' workers 
+        // Only if it hasn't been manually overridden by the user
+        if (isE) {
+            const inTime = computedEmp[`in${i}`];
+            const outTime = computedEmp[`out${i}`];
+            if ((inTime || outTime) && !computedEmp[`otOverride${i}`]) {
+                const autoOt = calculateAutoOT(inTime, outTime);
+                computedEmp[`ot${i}`] = autoOt === 0 ? "" : autoOt.toString();
+            }
+        }
+
+        const manual = String(computedEmp[`d${i}`] || "").trim().toUpperCase();
         const a = manual || autoWoDays[i] || "";
         const isSunday = weekends.includes(i);
-        const o = String(emp[`ot${i}`] || "").trim();
+        const o = String(computedEmp[`ot${i}`] || "").trim();
 
         let getsExtraWo = false;
         if (isE && isSunday && manual && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(manual)) getsExtraWo = true;
@@ -170,7 +184,7 @@ const compute = (emp, monthConf) => {
         if (a === "P") { pr += 1; pOnly += 1; }
         else if (a === "P?") { pr += 1; pOnly += 1; pMiss += 1; } 
         else if (a === "T") { pr += 1; t += 1; }
-        else if (a === "L") { pr += 1; leave += 1; }
+        else if (a === "L") { pr += 1; leave += 1; } // Paid Leave counts as Present/Paid Day
         else if (a === "W/O") { pr += 1; wo += 1; }
         else if (a === "0.5" || a === "H") { pr += 0.5; h += 1; }
         else if (a === "A") ab += 1;
@@ -179,9 +193,9 @@ const compute = (emp, monthConf) => {
         if (o && !isNaN(parseFloat(o))) ot += parseFloat(o);
     }
 
-    const bas = parseFloat(emp.basicSalary) || 0;
-    const pBal = parseFloat(emp.previousBalance) || 0;
-    const adv = parseFloat(emp.advance) || 0;
+    const bas = parseFloat(computedEmp.basicSalary) || 0;
+    const pBal = parseFloat(computedEmp.previousBalance) || 0;
+    const adv = parseFloat(computedEmp.advance) || 0;
     const pd = bas > 0 ? bas / days : 0;
     const ph = pd > 0 ? pd / 8.5 : 0;
     
@@ -192,11 +206,11 @@ const compute = (emp, monthConf) => {
     const pay = bal - adv;
 
     return { 
-        ...emp, 
+        ...computedEmp, 
         present: pr, pOnly, absent: ab, otHrs: ot, tour: t, wo, half: h, pMiss, leave, autoWoDays, 
         workingDays: pr, perDaySalary: pd, perHrSalary: ph, monthlySalary: ms, 
         dailyOtSalary: dos, actualMonthly: act, balance: bal, salaryToBePaid: pay,
-        joiningDate: emp.joiningDate || ""
+        joiningDate: computedEmp.joiningDate || ""
     };
 };
 
@@ -544,6 +558,7 @@ useEffect(() => {
     MONTHS.forEach(m => {
         localStorage.setItem(m.dbKey, JSON.stringify(dbs[m.id]));
     });
+    // Trigger real-time auto-save directly to local system directory when database changes
     autoSyncToLocalDirectory(db);
 }, [dbs]);
 
@@ -631,7 +646,7 @@ const selectLocalDirectory = async () => {
         }
         const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
         setDirHandle(handle);
-        await saveHandleToIDB(handle);
+        await saveHandleToIDB(handle); // Write handle to IndexedDB for persistent link
         setIsDirGranted(true);
         notify("Workspace synced permanently!", "success");
     } catch (err) {
@@ -655,6 +670,7 @@ const triggerLocalUnlock = async () => {
     }
 };
 
+// Auto-Sync system to save local backup files organized by folders (Month Name)
 const autoSyncToLocalDirectory = async (currentDb) => {
     if (!dirHandle || !isDirGranted || !currentDb || currentDb.length === 0) return;
     try {
@@ -665,6 +681,7 @@ const autoSyncToLocalDirectory = async (currentDb) => {
         const file = await subfolder.getFileHandle(fileName, { create: true });
         const writable = await file.createWritable();
         
+        // Strip non-essential properties for clean import files
         const cleanState = currentDb.map(e => {
             const raw = { ...e };
             delete raw.autoWoDays; 
@@ -694,7 +711,14 @@ const handleImport = (e) => {
                         const em = { id: Math.random().toString(36).substr(2, 9), srNo: String(row[0]||"").trim(), name: n, dept: String(row[2]||"").trim(), code: String(row[3]||"").trim() || `C-${i}`, type: String(row[4]||"").trim(), basicSalary: parseFloat(row[67]) || 0, previousBalance: parseFloat(row[80]) || 0, advance: parseFloat(row[82]) || 0, joiningDate: "" };
                         for (let d = 1; d <= activeConf.days; d++) { 
                             em[`d${d}`] = String(row[5+(d-1)*2]||"").trim(); 
-                            em[`ot${d}`] = String(row[6+(d-1)*2]||"").trim(); 
+                            
+                            // If CSV manually contains an OT value, preserve it by setting an override
+                            const rawOt = String(row[6+(d-1)*2]||"").trim();
+                            em[`ot${d}`] = rawOt; 
+                            if(rawOt !== "") {
+                                em[`otOverride${d}`] = true;
+                            }
+                            
                             em[`c${d}`] = "";
                             em[`in${d}`] = "";
                             em[`out${d}`] = "";
@@ -850,6 +874,7 @@ const handleExportExcel = () => {
     } catch(err) { notify("Failed to export Excel", "error"); console.error(err); }
 };
 
+// EXPORT: Special In/Out Excel format
 const handleExportInOutExcel = () => {
     if (db.length === 0) { notify("No data to export", "error"); return; }
     try {
@@ -1128,8 +1153,9 @@ const updateAtt = useCallback((day, val) => {
     setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`d${day}`]: val }, activeConf) : e));
 }, [selectedId, activeConf, setDb]);
 
+// Manual OT override
 const updateOt = (day, val) => {
-    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`ot${day}`]: val }, activeConf) : e));
+    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`ot${day}`]: val, [`otOverride${day}`]: true }, activeConf) : e));
     setOtModal({ show: false, day: null, val: "" });
     setTimeout(() => { document.getElementById(`day-${day}`)?.focus(); }, 10);
 };
@@ -1140,22 +1166,20 @@ const updateComment = (day, val) => {
     setTimeout(() => { document.getElementById(`day-${day}`)?.focus(); }, 10);
 };
 
-// Auto OT Injection via Time Select
 const handleTimeSelect = (timeStr) => {
     if (timeModal.step === 'in') {
         setTimeModal(prev => ({ ...prev, step: 'out', inVal: timeStr, custom: '' }));
     } else {
         setDb(prev => prev.map(e => {
             if (e.id === selectedId) {
-                let updatedEmp = { ...e, [`in${timeModal.day}`]: timeModal.inVal, [`out${timeModal.day}`]: timeStr };
-                
-                // Auto OT logic for E type
-                if (String(updatedEmp.type || "").trim().toUpperCase() === "E") {
-                    const autoOt = calculateAutoOT(timeModal.inVal, timeStr);
-                    // If it evaluates to 0, we can clear it or leave it 0
-                    updatedEmp[`ot${timeModal.day}`] = autoOt === 0 ? "" : autoOt;
-                }
-                
+                // When we receive new punch times, we clear the manual OT override
+                // so the automatic OT engine takes over again.
+                let updatedEmp = { 
+                    ...e, 
+                    [`in${timeModal.day}`]: timeModal.inVal, 
+                    [`out${timeModal.day}`]: timeStr,
+                    [`otOverride${timeModal.day}`]: false 
+                };
                 return compute(updatedEmp, activeConf);
             }
             return e;
@@ -1184,8 +1208,8 @@ const handleMigrateEmployees = () => {
     if (confirm(`Copy ${oldDb.length} employees from the other month into ${activeConf.label}? All their attendance logic will start fresh.`)) {
         const copied = oldDb.map(e => {
             const newE = { ...e };
-            for(let i=1; i<=31; i++) { delete newE[`d${i}`]; delete newE[`ot${i}`]; delete newE[`c${i}`]; delete newE[`in${i}`]; delete newE[`out${i}`]; }
-            for(let i=1; i<=activeConf.days; i++) { newE[`d${i}`] = ""; newE[`ot${i}`] = ""; newE[`c${i}`] = ""; newE[`in${i}`] = ""; newE[`out${i}`] = ""; }
+            for(let i=1; i<=31; i++) { delete newE[`d${i}`]; delete newE[`ot${i}`]; delete newE[`c${i}`]; delete newE[`in${i}`]; delete newE[`out${i}`]; delete newE[`otOverride${i}`]; }
+            for(let i=1; i<=activeConf.days; i++) { newE[`d${i}`] = ""; newE[`ot${i}`] = ""; newE[`c${i}`] = ""; newE[`in${i}`] = ""; newE[`out${i}`] = ""; newE[`otOverride${i}`] = false; }
             newE.previousBalance = 0; newE.advance = 0;
             return compute(newE, activeConf);
         });
@@ -1283,7 +1307,7 @@ if (auth.isLocked) {
                 <div className="rounded bg-brand-50 text-brand-600 d-flex align-items-center justify-content-center mx-auto mb-4 shadow-sm" style={{ width: '64px', height: '64px' }}>
                     <Icon path="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" style={{ width: '32px', height: '32px' }} />
                 </div>
-                <h1 className="h3 fw-bold text-dark mb-2"><span className="text-brand-600">Arpit</span> HR OS</h1>
+                <h1 className="h3 fw-bold text-dark mb-2"><span className="text-brand-600">Arise</span> HR OS</h1>
                 <p className="small text-muted mb-4 fw-bold">{!auth.hasPassword ? "Create a master password." : "Enter your master password."}</p>
                 <form onSubmit={handleLogin} className="w-100">
                     <input type="password" placeholder={!auth.hasPassword ? "New Password" : "Password"} value={passInput} onChange={e => setPassInput(e.target.value)} className="form-control form-control-lg text-center fw-bold text-dark bg-light mb-3" style={{ fontSize: '20px', letterSpacing: '4px' }} autoFocus />
@@ -1347,6 +1371,7 @@ return (
                     </button>
                 </div>
 
+                {/* Local Folder Synchronization Integration (Permanent System Backup) */}
                 <div className="border-top pt-2 mt-1">
                     {!dirHandle ? (
                         <button onClick={selectLocalDirectory} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-outline-secondary" style={{ fontSize: '10px', height: '32px' }}>
@@ -1615,6 +1640,7 @@ return (
                     <div className="d-flex flex-column"><span className="small text-brand-600 text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Total OT</span><span className="h5 fw-bold text-brand-600 mb-0">{activeEmp.otHrs}h</span></div>
                 </div>
 
+                {/* Normalized Metrics Row Layout via responsive row columns */}
                 <div className="row row-cols-2 row-cols-md-5 g-2 mt-3">
                     <div className="col">
                         <div className="p-3 bg-light rounded border h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
