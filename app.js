@@ -1,3 +1,4 @@
+/* @jsxRuntime classic */
 const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 const PWD_KEY = 'arise_sys_pwd';
@@ -9,7 +10,7 @@ const IDB_DB_NAME = "arise_directory_db_v1";
 const IDB_STORE_NAME = "handles";
 const IDB_KEY = "folder_sync_handle";
 
-// IndexedDB Helper utilities to persist directory handles across page refreshes securely
+// IndexedDB Helper utilities
 const saveHandleToIDB = async (handle) => {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open(IDB_DB_NAME, 1);
@@ -68,66 +69,6 @@ const formatDate = (dStr) => {
     return dStr;
 };
 
-// Time Helper to parse time string like "9:30 AM" or "5:45 PM" to minutes from midnight
-const parseTimeToMinutes = (timeStr) => {
-    if (!timeStr) return null;
-    const match = timeStr.trim().toUpperCase().match(/^(\d+):(\d+)\s*(AM|PM)$/);
-    if (!match) return null;
-    let [_, hours, minutes, ampm] = match;
-    let h = parseInt(hours, 10);
-    let m = parseInt(minutes, 10);
-    if (ampm === 'PM' && h !== 12) h += 12;
-    if (ampm === 'AM' && h === 12) h = 0;
-    return h * 60 + m;
-};
-
-// Auto Overtime & Deduction Calculation engine according to specific rules for type "E" employees
-const calculateAutoOT = (inTimeStr, outTimeStr) => {
-    let otPoints = 0;
-    
-    // In-Time Rules
-    const inMins = parseTimeToMinutes(inTimeStr);
-    if (inMins !== null) {
-        // In-Time Overtime (Early Arrival)
-        if (inMins >= 505 && inMins <= 520) { // 8:25 AM to 8:40 AM
-            otPoints += 0.5;
-        } else if (inMins < 505 && inMins >= 360) { // Earlier than 8:25 AM (down to 6:00 AM)
-            otPoints += 1.0;
-        }
-        // In-Time Penalty (Late Arrival)
-        else if (inMins >= 551 && inMins <= 584) { // 9:11 AM to 9:44 AM (comes after 9:10 to 9:44)
-            otPoints -= 0.5;
-        } else if (inMins >= 585 && inMins <= 610) { // 9:45 AM to 10:10 AM
-            otPoints -= 1.0;
-        }
-    }
-
-    // Out-Time Rules
-    const outMins = parseTimeToMinutes(outTimeStr);
-    if (outMins !== null) {
-        // Out-Time Overtime (Late Departure)
-        if (outMins >= 1065 && outMins <= 1094) { // 5:45 PM to 6:14 PM
-            otPoints += 0.5;
-        } else if (outMins >= 1095 && outMins <= 1125) { // 6:15 PM to 6:45 PM
-            otPoints += 1.0;
-        } else if (outMins >= 1126 && outMins <= 1155) { // 6:46 PM to 7:15 PM
-            otPoints += 1.5;
-        } else if (outMins >= 1156) { // 7:16 PM onwards
-            otPoints += 2.0;
-        }
-        // Out-Time Penalty (Early Departure)
-        else if (outMins >= 1005 && outMins <= 1040) { // 4:45 PM to 5:20 PM
-            otPoints -= 0.5;
-        } else if (outMins >= 976 && outMins <= 1004) { // 4:16 PM to 4:44 PM
-            otPoints -= 1.0;
-        } else if (outMins >= 955 && outMins <= 975) { // 3:55 PM to 4:15 PM
-            otPoints -= 1.5;
-        }
-    }
-
-    return otPoints !== 0 ? otPoints : "";
-};
-
 // Time Options Generators
 const generateTimeOptions = (startHr, startMin, endHr, endMin) => {
     const times = [];
@@ -142,10 +83,12 @@ const generateTimeOptions = (startHr, startMin, endHr, endMin) => {
     }
     return times;
 };
-const inTimeOptions = generateTimeOptions(8, 30, 11, 0); // 8:30 AM to 11:00 AM
-const outTimeOptions = generateTimeOptions(16, 0, 21, 0); // 4:00 PM to 9:00 PM
 
-const SUGGESTED_IN_TIMES = ['9:00 AM', '9:30 AM', '10:00 AM', '10:30 AM'];
+// Expanded time options to cover the new early/late OT rules
+const inTimeOptions = generateTimeOptions(7, 30, 11, 0); // 7:30 AM to 11:00 AM
+const outTimeOptions = generateTimeOptions(15, 30, 21, 0); // 3:30 PM to 9:00 PM
+
+const SUGGESTED_IN_TIMES = ['8:00 AM', '9:00 AM', '9:30 AM', '10:00 AM'];
 const SUGGESTED_OUT_TIMES = ['5:30 PM', '6:00 PM', '6:30 PM', '7:00 PM'];
 
 const formatTimeInput = (time24) => {
@@ -157,7 +100,46 @@ const formatTimeInput = (time24) => {
     return `${h}:${m} ${ampm}`;
 };
 
-// Dynamic Computation based on selected Month Configuration
+// --- AUTO OT CALCULATION LOGIC ---
+const parseTimeMins = (timeStr) => {
+    if (!timeStr) return null;
+    const [time, modifier] = timeStr.split(' ');
+    if (!time || !modifier) return null;
+    let [hours, minutes] = time.split(':').map(Number);
+    if (hours === 12) hours = 0;
+    if (modifier.toUpperCase() === 'PM') hours += 12;
+    return hours * 60 + minutes;
+};
+
+const calculateAutoOT = (inStr, outStr) => {
+    const inMins = parseTimeMins(inStr);
+    const outMins = parseTimeMins(outStr);
+    let ot = 0;
+
+    // IN TIME Rules
+    if (inMins !== null) {
+        if (inMins >= 470 && inMins <= 504) ot += 1.0;       // 07:50 - 08:24
+        else if (inMins >= 505 && inMins <= 520) ot += 0.5;  // 08:25 - 08:40
+        else if (inMins >= 551 && inMins <= 584) ot -= 0.5;  // 09:11 - 09:44
+        else if (inMins >= 585 && inMins <= 610) ot -= 1.0;  // 09:45 - 10:10
+    }
+
+    // OUT TIME Rules
+    if (outMins !== null) {
+        if (outMins >= 955 && outMins <= 975) ot -= 1.5;       // 15:55 - 16:15 (Early Penalty)
+        else if (outMins >= 976 && outMins <= 1004) ot -= 1.0; // 16:16 - 16:44 (Early Penalty)
+        else if (outMins >= 1005 && outMins <= 1040) ot -= 0.5;// 16:45 - 17:20 (Early Penalty)
+        else if (outMins >= 1065 && outMins <= 1094) ot += 0.5;// 17:45 - 18:14 (OT)
+        else if (outMins >= 1095 && outMins <= 1125) ot += 1.0;// 18:15 - 18:45 (OT)
+        else if (outMins >= 1126 && outMins <= 1155) ot += 1.5;// 18:46 - 19:15 (OT)
+        else if (outMins >= 1156 && outMins <= 1185) ot += 2.0;// 19:16 - 19:45 (OT)
+    }
+
+    return ot;
+};
+// ---------------------------------
+
+// Dynamic Computation
 const compute = (emp, monthConf) => {
     let pr = 0, pOnly = 0, ab = 0, ot = 0, t = 0, wo = 0, h = 0, pMiss = 0, leave = 0;
     let autoWoDays = {};
@@ -180,16 +162,7 @@ const compute = (emp, monthConf) => {
         const manual = String(emp[`d${i}`] || "").trim().toUpperCase();
         const a = manual || autoWoDays[i] || "";
         const isSunday = weekends.includes(i);
-        
-        let o = String(emp[`ot${i}`] || "").trim();
-
-        // On-the-fly dynamic automatic OT/Deduction logic for E-type workers if not manually overwritten
-        if (isE && o === "" && emp[`in${i}`] && emp[`out${i}`]) {
-            const computedOt = calculateAutoOT(emp[`in${i}`], emp[`out${i}`]);
-            if (computedOt !== "") {
-                o = String(computedOt);
-            }
-        }
+        const o = String(emp[`ot${i}`] || "").trim();
 
         let getsExtraWo = false;
         if (isE && isSunday && manual && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(manual)) getsExtraWo = true;
@@ -197,7 +170,7 @@ const compute = (emp, monthConf) => {
         if (a === "P") { pr += 1; pOnly += 1; }
         else if (a === "P?") { pr += 1; pOnly += 1; pMiss += 1; } 
         else if (a === "T") { pr += 1; t += 1; }
-        else if (a === "L") { pr += 1; leave += 1; } // Paid Leave counts as Present/Paid Day
+        else if (a === "L") { pr += 1; leave += 1; }
         else if (a === "W/O") { pr += 1; wo += 1; }
         else if (a === "0.5" || a === "H") { pr += 0.5; h += 1; }
         else if (a === "A") ab += 1;
@@ -232,6 +205,12 @@ const defaultEmp = (monthConf) => {
     for (let i = 1; i <= monthConf.days; i++) { e[`d${i}`] = ""; e[`ot${i}`] = ""; e[`c${i}`] = ""; e[`in${i}`] = ""; e[`out${i}`] = ""; }
     return compute(e, monthConf);
 };
+
+const Icon = ({ path, className="w-5 h-5" }) => (
+<svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style={{ width: '1.1rem', height: '1.1rem', display: 'inline-block' }}>
+<path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={path}></path>
+</svg>
+);
 
 const OwnerDashboard = ({ db, activeConf }) => {
     const stats = useMemo(() => {
@@ -565,7 +544,6 @@ useEffect(() => {
     MONTHS.forEach(m => {
         localStorage.setItem(m.dbKey, JSON.stringify(dbs[m.id]));
     });
-    // Trigger real-time auto-save directly to local system directory when database changes
     autoSyncToLocalDirectory(db);
 }, [dbs]);
 
@@ -653,7 +631,7 @@ const selectLocalDirectory = async () => {
         }
         const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
         setDirHandle(handle);
-        await saveHandleToIDB(handle); // Write handle to IndexedDB for persistent link
+        await saveHandleToIDB(handle);
         setIsDirGranted(true);
         notify("Workspace synced permanently!", "success");
     } catch (err) {
@@ -677,7 +655,6 @@ const triggerLocalUnlock = async () => {
     }
 };
 
-// Auto-Sync system to save local backup files organized by folders (Month Name)
 const autoSyncToLocalDirectory = async (currentDb) => {
     if (!dirHandle || !isDirGranted || !currentDb || currentDb.length === 0) return;
     try {
@@ -688,7 +665,6 @@ const autoSyncToLocalDirectory = async (currentDb) => {
         const file = await subfolder.getFileHandle(fileName, { create: true });
         const writable = await file.createWritable();
         
-        // Strip non-essential properties for clean import files
         const cleanState = currentDb.map(e => {
             const raw = { ...e };
             delete raw.autoWoDays; 
@@ -818,24 +794,14 @@ const handleExportExcel = () => {
             for (let i = 1; i <= activeConf.days; i++) {
                 const isWk = activeConf.weekends.includes(i);
                 const bg = isWk ? CLR_YELLOW : null;
-                const manualVal = emp[`d${i}`];
-                const autoWoVal = !manualVal && emp.autoWoDays?.[i] === "W/O" ? "W/O" : "";
-                const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
+                const manual = String(emp[`d${i}`] || "").trim().toUpperCase();
+                const aVal = manual || (emp.autoWoDays?.[i] || "");
                 row.push(cell(aVal, bg, false));
-                
-                // Read overtime correctly - if automatically computed or overridden
-                let otValue = String(emp[`ot${i}`] || "").trim();
-                const isE = String(emp.type || "").trim().toUpperCase() === "E";
-                if (isE && otValue === "" && emp[`in${i}`] && emp[`out${i}`]) {
-                    const computedOt = calculateAutoOT(emp[`in${i}`], emp[`out${i}`]);
-                    if (computedOt !== "") {
-                        otValue = String(computedOt);
-                    }
-                }
-                const otRawFloat = (otValue !== "" && !isNaN(otValue)) ? parseFloat(otValue) : "";
-                const otC = cell(otRawFloat, bg, false);
-                if (otRawFloat !== "" && otRawFloat < 0) otC.s.font = { color: { rgb: "FF0000" }, bold: true };
-                else if (otRawFloat !== "" && otRawFloat > 0) otC.s.font = { color: { rgb: "0000FF" }, bold: true };
+                const otRaw = String(emp[`ot${i}`] || "").trim();
+                const otVal = (otRaw !== "" && !isNaN(otRaw)) ? parseFloat(otRaw) : "";
+                const otC = cell(otVal, bg, false);
+                if (otVal !== "" && otVal < 0) otC.s.font = { color: { rgb: "FF0000" }, bold: true };
+                else if (otVal !== "" && otVal > 0) otC.s.font = { color: { rgb: "0000FF" }, bold: true };
                 row.push(otC);
             }
 
@@ -884,7 +850,6 @@ const handleExportExcel = () => {
     } catch(err) { notify("Failed to export Excel", "error"); console.error(err); }
 };
 
-// EXPORT: Special In/Out Excel format
 const handleExportInOutExcel = () => {
     if (db.length === 0) { notify("No data to export", "error"); return; }
     try {
@@ -1175,28 +1140,26 @@ const updateComment = (day, val) => {
     setTimeout(() => { document.getElementById(`day-${day}`)?.focus(); }, 10);
 };
 
+// Auto OT Injection via Time Select
 const handleTimeSelect = (timeStr) => {
     if (timeModal.step === 'in') {
         setTimeModal(prev => ({ ...prev, step: 'out', inVal: timeStr, custom: '' }));
     } else {
-        // Automatically calculate OT for E-type workers upon selecting out time
-        const isE = String(activeEmp.type || "").trim().toUpperCase() === "E";
-        const autoOt = isE ? calculateAutoOT(timeModal.inVal, timeStr) : "";
-
         setDb(prev => prev.map(e => {
             if (e.id === selectedId) {
-                const updated = { 
-                    ...e, 
-                    [`in${timeModal.day}`]: timeModal.inVal, 
-                    [`out${timeModal.day}`]: timeStr,
-                    // Store auto-calculated OT if it's evaluated, else keep previous or set blank
-                    [`ot${timeModal.day}`]: autoOt !== "" ? String(autoOt) : ""
-                };
-                return compute(updated, activeConf);
+                let updatedEmp = { ...e, [`in${timeModal.day}`]: timeModal.inVal, [`out${timeModal.day}`]: timeStr };
+                
+                // Auto OT logic for E type
+                if (String(updatedEmp.type || "").trim().toUpperCase() === "E") {
+                    const autoOt = calculateAutoOT(timeModal.inVal, timeStr);
+                    // If it evaluates to 0, we can clear it or leave it 0
+                    updatedEmp[`ot${timeModal.day}`] = autoOt === 0 ? "" : autoOt;
+                }
+                
+                return compute(updatedEmp, activeConf);
             }
             return e;
         }));
-        
         setTimeModal({ show: false, day: null, step: 'in', inVal: '', outVal: '', custom: '' });
         setFocusDay(prev => Math.min(activeConf.days, prev + 1)); 
     }
@@ -1253,21 +1216,19 @@ useEffect(() => {
 
         const key = e.key.toLowerCase();
         
-        // Mark Present & Trigger Time Bubble
         if (key === 'p') { 
             updateAtt(focusDay, 'P'); 
             setTimeModal({ show: true, day: focusDay, step: 'in', inVal: '', outVal: '', custom: '' });
             e.preventDefault(); 
         }
         
-        // Handling status keys including L (Paid Leave)
         if (['a', 'h', 't', 'w', 'l'].includes(key) || e.key === 'Backspace' || e.key === 'Delete') { 
             let val = '';
             if (key === 'a') val = 'A';
             if (key === 'h') val = 'H';
             if (key === 't') val = 'T';
             if (key === 'w') val = 'W/O';
-            if (key === 'l') val = 'L'; // Paid Leave shortcut
+            if (key === 'l') val = 'L';
             setDb(prev => prev.map(em => em.id === selectedId ? compute({ ...em, [`d${focusDay}`]: val, [`in${focusDay}`]: '', [`out${focusDay}`]: '' }, activeConf) : em));
             setFocusDay(prev => Math.min(activeConf.days, prev + 1)); 
             e.preventDefault();
@@ -1311,7 +1272,7 @@ const getAttColor = (val) => {
     if (val === '0.5' || val === 'H') return 'bg-warning text-dark border-warning';
     if (val === 'T') return 'bg-info text-white border-info';
     if (val === 'W/O') return 'bg-primary text-white border-primary';
-    if (val === 'L') return 'bg-status-l text-white border-status-l'; // Support for 'L' (Paid Leave)
+    if (val === 'L') return 'bg-status-l text-white border-status-l'; 
     return 'bg-secondary bg-opacity-10 text-secondary border-light';
 };
 
@@ -1386,7 +1347,6 @@ return (
                     </button>
                 </div>
 
-                {/* Local Folder Synchronization Integration (Permanent System Backup) */}
                 <div className="border-top pt-2 mt-1">
                     {!dirHandle ? (
                         <button onClick={selectLocalDirectory} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-outline-secondary" style={{ fontSize: '10px', height: '32px' }}>
@@ -1520,17 +1480,10 @@ return (
                         else if (aVal === 'H' || aVal === '0.5') h++;
                         else if (aVal === 'T') t++;
                         else if (aVal === 'W/O') wo++;
-                        else if (aVal === 'L') l++; // Paid Leave
+                        else if (aVal === 'L') l++;
 
                         if (getsExtraWo) wo++;
-                        
-                        // Access OT, supporting dynamic calculation on the fly
-                        let otVal = emp[`ot${logDate}`];
-                        if (isE && otVal === "" && emp[`in${logDate}`] && emp[`out${logDate}`]) {
-                            const computedOt = calculateAutoOT(emp[`in${logDate}`], emp[`out${logDate}`]);
-                            if (computedOt !== "") otVal = computedOt;
-                        }
-                        const ot = parseFloat(otVal);
+                        const ot = parseFloat(emp[`ot${logDate}`]);
                         if(!isNaN(ot)) otTotal += ot;
                     });
 
@@ -1601,14 +1554,7 @@ return (
                                     const manualVal = emp[`d${logDate}`];
                                     const autoWoVal = !manualVal && emp.autoWoDays?.[logDate] === "W/O" ? "W/O" : "";
                                     const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
-                                    
-                                    // Parse OT value allowing on-the-fly display
-                                    let otVal = emp[`ot${logDate}`];
-                                    const isE = String(emp.type || "").trim().toUpperCase() === "E";
-                                    if (isE && otVal === "" && emp[`in${logDate}`] && emp[`out${logDate}`]) {
-                                        const computedOt = calculateAutoOT(emp[`in${logDate}`], emp[`out${logDate}`]);
-                                        if (computedOt !== "") otVal = computedOt;
-                                    }
+                                    const otVal = emp[`ot${logDate}`];
                                     return (
                                         <tr key={emp.id}>
                                             <td className="p-3 fw-bold text-dark">{emp.name}</td>
@@ -1624,7 +1570,7 @@ return (
                                                 {!emp[`in${logDate}`] && !emp[`out${logDate}`] && '-'}
                                             </td>
                                             <td className="p-3">
-                                                {otVal ? <span className="badge border bg-brand-100 text-brand-700 border-brand-200" style={{ fontSize: '10px' }}>{otVal} Hrs</span> : '-'}
+                                                {otVal ? <span className={`badge border ${parseFloat(otVal) < 0 ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-10' : 'bg-brand-100 text-brand-700 border-brand-200'}`} style={{ fontSize: '10px' }}>{otVal} Hrs</span> : '-'}
                                             </td>
                                         </tr>
                                     )
@@ -1669,7 +1615,6 @@ return (
                     <div className="d-flex flex-column"><span className="small text-brand-600 text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Total OT</span><span className="h5 fw-bold text-brand-600 mb-0">{activeEmp.otHrs}h</span></div>
                 </div>
 
-                {/* Normalized Metrics Row Layout via responsive row columns */}
                 <div className="row row-cols-2 row-cols-md-5 g-2 mt-3">
                     <div className="col">
                         <div className="p-3 bg-light rounded border h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
@@ -1732,14 +1677,7 @@ return (
                         const isAutoWo = !manualVal && autoWoVal === "W/O";
                         const isE = String(activeEmp.type || "").trim().toUpperCase() === "E";
                         const getsExtraWo = isWk && isE && manualVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(String(manualVal).toUpperCase());
-                        
-                        // Access OT, supporting dynamic calculation on the fly
-                        let oVal = activeEmp[`ot${dNum}`];
-                        if (isE && oVal === "" && activeEmp[`in${dNum}`] && activeEmp[`out${dNum}`]) {
-                            const computedOt = calculateAutoOT(activeEmp[`in${dNum}`], activeEmp[`out${dNum}`]);
-                            if (computedOt !== "") oVal = computedOt;
-                        }
-
+                        const oVal = activeEmp[`ot${dNum}`];
                         const cVal = activeEmp[`c${dNum}`];
                         const inVal = activeEmp[`in${dNum}`];
                         const outVal = activeEmp[`out${dNum}`];
