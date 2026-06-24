@@ -167,9 +167,9 @@ const compute = (emp, monthConf) => {
         if (isE) {
             const inTime = computedEmp[`in${i}`];
             const outTime = computedEmp[`out${i}`];
-            if (inTime && outTime && !computedEmp[`otOverride${i}`]) {
-                const calculatedOt = calculateAutoOT(inTime, outTime);
-                computedEmp[`ot${i}`] = calculatedOt !== 0 ? String(calculatedOt) : "";
+            if ((inTime || outTime) && !computedEmp[`otOverride${i}`]) {
+                const autoOt = calculateAutoOT(inTime, outTime);
+                computedEmp[`ot${i}`] = autoOt === 0 ? "" : autoOt.toString();
             }
         }
 
@@ -193,9 +193,9 @@ const compute = (emp, monthConf) => {
         if (o && !isNaN(parseFloat(o))) ot += parseFloat(o);
     }
 
-    const bas = parseFloat(emp.basicSalary) || 0;
-    const pBal = parseFloat(emp.previousBalance) || 0;
-    const adv = parseFloat(emp.advance) || 0;
+    const bas = parseFloat(computedEmp.basicSalary) || 0;
+    const pBal = parseFloat(computedEmp.previousBalance) || 0;
+    const adv = parseFloat(computedEmp.advance) || 0;
     const pd = bas > 0 ? bas / days : 0;
     const ph = pd > 0 ? pd / 8.5 : 0;
     
@@ -535,23 +535,6 @@ const [dbs, setDbs] = useState(() => {
 const activeConf = useMemo(() => MONTHS.find(m => m.id === activeMonthKey), [activeMonthKey]);
 const db = useMemo(() => dbs[activeMonthKey] || [], [dbs, activeMonthKey]);
 
-// Voice Command Assistant State
-const [voiceLogs, setVoiceLogs] = useState([]);
-const [isListening, setIsListening] = useState(false);
-const [interimTranscript, setInterimTranscript] = useState("");
-const [isVoicePanelExpanded, setIsVoicePanelExpanded] = useState(false);
-const recognitionRef = useRef(null);
-
-// Safe Refs to keep state accessible inside Speech API callbacks without restarting mic
-const dbRef = useRef(db);
-const activeConfRef = useRef(activeConf);
-const activeTabRef = useRef("employees");
-const isListeningRef = useRef(false);
-
-useEffect(() => { dbRef.current = db; }, [db]);
-useEffect(() => { activeConfRef.current = activeConf; }, [activeConf]);
-useEffect(() => { isListeningRef.current = isListening; }, [isListening]);
-
 // Attempt to restore persistent system directory link from IndexedDB on page load/refresh
 useEffect(() => {
     const restoreDirectoryLink = async () => {
@@ -587,8 +570,6 @@ const setDb = useCallback((newDbOrFn) => {
 }, [activeMonthKey]);
 
 const [activeTab, setActiveTab] = useState("employees");
-useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
-
 const [logDate, setLogDate] = useState(1);
 const [selectedId, setSelectedId] = useState(null);
 const [search, setSearch] = useState("");
@@ -730,7 +711,14 @@ const handleImport = (e) => {
                         const em = { id: Math.random().toString(36).substr(2, 9), srNo: String(row[0]||"").trim(), name: n, dept: String(row[2]||"").trim(), code: String(row[3]||"").trim() || `C-${i}`, type: String(row[4]||"").trim(), basicSalary: parseFloat(row[67]) || 0, previousBalance: parseFloat(row[80]) || 0, advance: parseFloat(row[82]) || 0, joiningDate: "" };
                         for (let d = 1; d <= activeConf.days; d++) { 
                             em[`d${d}`] = String(row[5+(d-1)*2]||"").trim(); 
-                            em[`ot${d}`] = String(row[6+(d-1)*2]||"").trim(); 
+                            
+                            // If CSV manually contains an OT value, preserve it by setting an override
+                            const rawOt = String(row[6+(d-1)*2]||"").trim();
+                            em[`ot${d}`] = rawOt; 
+                            if(rawOt !== "") {
+                                em[`otOverride${d}`] = true;
+                            }
+                            
                             em[`c${d}`] = "";
                             em[`in${d}`] = "";
                             em[`out${d}`] = "";
@@ -1229,294 +1217,6 @@ const handleMigrateEmployees = () => {
     }
 };
 
-// Fuzzy matcher for voice command to correctly identify employees by name or code
-const findEmployeeByVoiceQuery = (query, currentDb) => {
-    const cleanQuery = query.toLowerCase().replace(/\s+/g, '');
-    if (!cleanQuery) return null;
-
-    let bestMatch = null;
-    let highestScore = 0;
-
-    for (let emp of currentDb) {
-        const cleanName = emp.name.toLowerCase().replace(/\s+/g, '');
-        const cleanCode = emp.code.toLowerCase().replace(/\s+/g, '');
-
-        if (cleanName === cleanQuery || cleanCode === cleanQuery) {
-            return emp; // Exact match priority
-        }
-
-        if (cleanName.includes(cleanQuery)) {
-            const score = cleanQuery.length / cleanName.length;
-            if (score > highestScore) {
-                highestScore = score;
-                bestMatch = emp;
-            }
-        } else if (cleanQuery.includes(cleanName)) {
-            const score = cleanName.length / cleanQuery.length;
-            if (score > highestScore) {
-                highestScore = score;
-                bestMatch = emp;
-            }
-        }
-    }
-    return bestMatch;
-};
-
-// Parser to process verbal transcripts and extract actions with high connective tolerance
-const parseVoiceCommand = (rawText) => {
-    let text = rawText.toLowerCase().trim();
-    // Remove common punctuation added by browser speech transcriptions (periods, questions)
-    text = text.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"").trim();
-    // Normalize ordinal day terms (e.g. "13th" -> "13")
-    text = text.replace(/\b(\d+)(st|nd|rd|th)\b/gi, '$1');
-
-    // Number translation map in case browser outputs written words instead of digits
-    const numberWords = {
-        'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-        'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15, 'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20,
-        'twenty one': 21, 'twenty-one': 21, 'twenty two': 22, 'twenty-two': 22, 'twenty three': 23, 'twenty-three': 23, 'twenty four': 24, 'twenty-four': 24,
-        'twenty five': 25, 'twenty-five': 25, 'twenty six': 26, 'twenty-six': 26, 'twenty seven': 27, 'twenty-seven': 27, 'twenty eight': 28, 'twenty-eight': 28,
-        'twenty nine': 29, 'twenty-nine': 29, 'thirty': 30, 'thirty one': 31, 'thirty-one': 31
-    };
-
-    let day = null;
-    // Step 1: Detect trailing day number first
-    const dayMatch = text.match(/\b(\d{1,2})$/);
-    if (dayMatch) {
-        day = parseInt(dayMatch[1], 10);
-        // Strip day digit and optional connectives (on, of, day, date) from the end
-        text = text.replace(/\s*(?:on|of|day|date)?\s*\d{1,2}$/, '').trim();
-    } else {
-        // Fallback: Check if day is spoken as a written word
-        for (let word in numberWords) {
-            const r = new RegExp(`\\b${word}$`, 'i');
-            if (text.match(r)) {
-                day = numberWords[word];
-                text = text.replace(new RegExp(`\\s*(?:on|of|day|date)?\\s*${word}$`, 'i'), '').trim();
-                break;
-            }
-        }
-    }
-
-    if (!day) return null; // Action day is required
-
-    // Step 2: Detect Clock IN/OUT verbal pattern (e.g. "Ravi Kumar in 8 30 out 6 30")
-    // This allows passing standard space-separated hour and minute spoken variations.
-    const inOutRegex = /\bin\s+(\d{1,2})(?:\s+(\d{1,2}))?\s+out\s+(\d{1,2})(?:\s+(\d{1,2}))?\b/i;
-    const inOutMatch = text.match(inOutRegex);
-    if (inOutMatch) {
-        const empNameQuery = text.replace(inOutRegex, '').trim();
-        const inHr = parseInt(inOutMatch[1], 10);
-        const inMin = inOutMatch[2] ? parseInt(inOutMatch[2], 10).toString().padStart(2, '0') : "00";
-        const outHr = parseInt(inOutMatch[3], 10);
-        const outMin = inOutMatch[4] ? parseInt(inOutMatch[4], 10).toString().padStart(2, '0') : "00";
-
-        // Automatically configure meridian (AM/PM). Assumes standard shift parameters.
-        const inModifier = (inHr >= 7 && inHr <= 11) ? "AM" : "PM";
-        const outModifier = (outHr >= 1 && outHr <= 11) ? "PM" : "AM";
-
-        const inTimeStr = `${inHr}:${inMin} ${inModifier}`;
-        const outTimeStr = `${outHr}:${outMin} ${outModifier}`;
-
-        return {
-            type: 'punch',
-            empNameQuery,
-            inTime: inTimeStr,
-            outTime: outTimeStr,
-            day
-        };
-    }
-
-    // Step 3: Handle Comment commands (E.g. "Ravi Kumar comment late card entry")
-    const commentTerms = ['comment', 'note'];
-    for (let term of commentTerms) {
-        const termIdx = text.indexOf(' ' + term + ' ');
-        if (termIdx !== -1) {
-            const empNameQuery = text.substring(0, termIdx).trim();
-            const commentText = text.substring(termIdx + term.length + 2).trim();
-            return { type: 'comment', empNameQuery, commentText, day, rawText };
-        }
-    }
-
-    // Step 4: Handle Overtime (OT) / Penalty commands (E.g. "Ravi Kumar minus 2", "Ravi Kumar penalty 1.5")
-    const otKeywords = ['ot plus', 'plus', 'ot minus', 'minus', 'ot', 'penalty', 'late'];
-    for (let term of otKeywords) {
-        const termIdx = text.indexOf(' ' + term + ' ');
-        if (termIdx !== -1) {
-            const empNameQuery = text.substring(0, termIdx).trim();
-            const valuePart = text.substring(termIdx + term.length + 2).trim();
-            const numMatch = valuePart.match(/^(-?\d+(?:\.\d+)?)/);
-            if (numMatch) {
-                let value = parseFloat(numMatch[1]);
-                if (['ot minus', 'minus', 'penalty', 'late'].includes(term) && value > 0) {
-                    value = -value; // Convert penalty integers to negative OT values automatically
-                }
-                return { type: 'ot', empNameQuery, value, day, rawText };
-            }
-        }
-    }
-
-    // Step 5: Handle Attendance Status mappings
-    const statusKeywords = [
-        { term: 'paid leave', status: 'L' },
-        { term: 'leave', status: 'L' },
-        { term: 'weekly off', status: 'W/O' },
-        { term: 'weekly', status: 'W/O' },
-        { term: 'off', status: 'W/O' },
-        { term: 'half day', status: 'H' },
-        { term: 'half', status: 'H' },
-        { term: 'present', status: 'P' },
-        { term: 'absent', status: 'A' },
-        { term: 'tour', status: 'T' }
-    ];
-
-    for (let item of statusKeywords) {
-        const termIdx = text.lastIndexOf(' ' + item.term);
-        // Check if keyword is located at the absolute end of the cleaned command string
-        if (termIdx !== -1 && termIdx + item.term.length + 1 >= text.length) {
-            const empNameQuery = text.substring(0, termIdx).trim();
-            return { type: 'status', empNameQuery, status: item.status, day, rawText };
-        }
-    }
-
-    return null;
-};
-
-// Execute voice updates inside database context
-const executeVoiceAction = (action, origText) => {
-    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    
-    if (!action) {
-        setVoiceLogs(prev => [{ text: `Could not parse: "${origText}"`, success: false, time: timestamp }, ...prev]);
-        return;
-    }
-
-    const currentDb = dbRef.current;
-    const matchedEmp = findEmployeeByVoiceQuery(action.empNameQuery, currentDb);
-
-    if (!matchedEmp) {
-        setVoiceLogs(prev => [{ text: `Employee "${action.empNameQuery}" was not found.`, success: false, time: timestamp }, ...prev]);
-        return;
-    }
-
-    const activeMonthDays = activeConfRef.current.days;
-    const dNum = action.day;
-    if (dNum < 1 || dNum > activeMonthDays) {
-        setVoiceLogs(prev => [{ text: `Invalid day "${dNum}" for ${activeConfRef.current.label}.`, success: false, time: timestamp }, ...prev]);
-        return;
-    }
-
-    setDb(prevDb => {
-        return prevDb.map(emp => {
-            if (emp.id === matchedEmp.id) {
-                let updated = { ...emp };
-                let logMsg = "";
-
-                if (action.type === 'status') {
-                    updated[`d${dNum}`] = action.status;
-                    if (['A', 'W/O', 'L'].includes(action.status)) {
-                        updated[`in${dNum}`] = "";
-                        updated[`out${dNum}`] = "";
-                    }
-                    logMsg = `Marked ${emp.name} as [${action.status}] on Day ${dNum}`;
-                } else if (action.type === 'punch') {
-                    updated[`d${dNum}`] = 'P';
-                    updated[`in${dNum}`] = action.inTime;
-                    updated[`out${dNum}`] = action.outTime;
-                    updated[`otOverride${dNum}`] = false; // Reset overrides so auto calculation updates
-                    logMsg = `Punched ${emp.name} IN: ${action.inTime}, OUT: ${action.outTime} on Day ${dNum}`;
-                } else if (action.type === 'ot') {
-                    updated[`ot${dNum}`] = String(action.value);
-                    updated[`otOverride${dNum}`] = true; // Flag manual override
-                    logMsg = `Updated OT of ${emp.name} to ${action.value} hrs on Day ${dNum}`;
-                } else if (action.type === 'comment') {
-                    updated[`c${dNum}`] = action.commentText;
-                    logMsg = `Added Comment to ${emp.name} on Day ${dNum}: "${action.commentText}"`;
-                }
-
-                setVoiceLogs(prev => [{ text: logMsg, success: true, time: timestamp }, ...prev]);
-                notify(logMsg, "success");
-                
-                // Focus newly altered record
-                setSelectedId(emp.id);
-                if (activeTabRef.current !== 'employees') {
-                    setActiveTab('employees');
-                }
-                setFocusDay(dNum);
-
-                return compute(updated, activeConfRef.current);
-            }
-            return emp;
-        });
-    });
-};
-
-// Initialize SpeechRecognition Service once
-useEffect(() => {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) return;
-
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = 'en-US';
-
-    recognition.onstart = () => setIsListening(true);
-    
-    // Auto-Restart logic to prevent timeout disconnects when the mic goes silent
-    recognition.onend = () => {
-        if (isListeningRef.current) {
-            try {
-                recognition.start();
-            } catch (err) {
-                // Mic reactivation was already handled
-            }
-        } else {
-            setIsListening(false);
-        }
-    };
-    
-    recognition.onresult = (event) => {
-        let interim = "";
-        let final = "";
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-            if (event.results[i].isFinal) {
-                final += event.results[i][0].transcript;
-            } else {
-                interim += event.results[i][0].transcript;
-            }
-        }
-        
-        if (interim) {
-            setInterimTranscript(interim);
-        }
-        if (final) {
-            setInterimTranscript("");
-            const parsed = parseVoiceCommand(final);
-            executeVoiceAction(parsed, final);
-        }
-    };
-
-    recognitionRef.current = recognition;
-}, []);
-
-const toggleListening = () => {
-    if (!recognitionRef.current) {
-        return notify("Web Speech API is not supported in this browser. Please try Chrome or Edge.", "error");
-    }
-    if (isListening) {
-        isListeningRef.current = false;
-        recognitionRef.current.stop();
-        setIsListening(false);
-    } else {
-        setInterimTranscript("");
-        isListeningRef.current = true;
-        recognitionRef.current.start();
-        setIsListening(true);
-        setIsVoicePanelExpanded(true);
-    }
-};
-
 useEffect(() => {
     const handleGlobalKey = (e) => {
         if (otModal.show || commentModal.show || pdfModal.show || timeModal.show) return;
@@ -1619,558 +1319,584 @@ if (auth.isLocked) {
 }
 
 return (
-<div className="d-flex vh-100 w-100 overflow-hidden text-dark bg-light flex-column">
+<div className="d-flex vh-100 w-100 overflow-hidden text-dark bg-light">
 
-    {/* Top Bar for Master Navigation and Real-Time Voice Activation Toggle */}
-    <div className="bg-white border-bottom px-4 py-2.5 d-flex justify-content-between align-items-center flex-shrink-0 z-3 shadow-sm">
-        <div className="d-flex align-items-center gap-2">
-            <span className="badge bg-brand-600 text-white rounded-pill px-2 py-1 fw-bold" style={{ fontSize: '10px' }}>ARISE OS</span>
-            <div className="small fw-semibold text-secondary">Workforce Command Center</div>
-        </div>
-
-        {/* Voice Control Button inside the Header */}
-        <div className="d-flex align-items-center gap-2">
-            <button 
-                onClick={toggleListening} 
-                className={`btn btn-sm d-flex align-items-center gap-2 px-3 py-1.5 rounded-pill border fw-bold ${
-                    isListening 
-                    ? 'btn-danger text-white border-danger mic-pulsing' 
-                    : 'btn-outline-secondary bg-white text-dark'
-                }`}
-                style={{ fontSize: '11px', transition: 'all 0.2s' }}
-            >
-                <span className={`rounded-circle ${isListening ? 'bg-white animate-pulse' : 'bg-danger'}`} style={{ width: '8px', height: '8px' }}></span>
-                {isListening ? "Voice Command Active" : "Enable Voice Entry"}
-            </button>
-            {isListening && (
-                <button 
-                    onClick={() => setIsVoicePanelExpanded(!isVoicePanelExpanded)} 
-                    className="btn btn-sm btn-light border px-2 py-1.5 rounded-circle"
-                    title="Toggle Event Logs Drawer"
-                >
-                    <Icon path={isVoicePanelExpanded ? "M19.5 8.25l-7.5 7.5-7.5-7.5" : "M4.5 15.75l7.5-7.5 7.5 7.5"} style={{ width: '14px', height: '14px' }} />
+    {/* Sidebar Section */}
+    <div style={{ width: '320px', minWidth: '320px' }} className="bg-white border-end d-flex flex-column shadow-sm z-3 h-100 overflow-hidden flex-shrink-0">
+        <div className="p-3 border-bottom bg-light d-flex flex-column gap-2 flex-shrink-0">
+            <div className="d-flex justify-content-between align-items-center">
+                <div>
+                    <h1 className="h5 fw-bold tracking-tight text-dark mb-0"><span className="text-brand-600">Arise</span> HR</h1>
+                    <p className="small text-muted mb-0 fw-semibold" style={{ fontSize: '11px' }}>{activeConf.label} Register</p>
+                </div>
+                <button onClick={() => { setAuth({...auth, isLocked: true}); notify("Locked securely.", "success"); }} className="btn btn-sm btn-light border d-flex align-items-center justify-content-center p-2 rounded" title="Lock System">
+                    <Icon path="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
                 </button>
-            )}
-        </div>
-    </div>
+            </div>
 
-    <div className="d-flex flex-grow-1 overflow-hidden w-100 position-relative">
-        
-        {/* Sidebar Section */}
-        <div style={{ width: '320px', minWidth: '320px' }} className="bg-white border-end d-flex flex-column shadow-sm z-3 h-100 overflow-hidden flex-shrink-0">
-            <div className="p-3 border-bottom bg-light d-flex flex-column gap-2 flex-shrink-0">
-                <div className="d-flex justify-content-between align-items-center">
-                    <div>
-                        <h1 className="h5 fw-bold tracking-tight text-dark mb-0"><span className="text-brand-600">Arise</span> HR</h1>
-                        <p className="small text-muted mb-0 fw-semibold" style={{ fontSize: '11px' }}>{activeConf.label} Register</p>
-                    </div>
-                    <button onClick={() => { setAuth({...auth, isLocked: true}); notify("Locked securely.", "success"); }} className="btn btn-sm btn-light border d-flex align-items-center justify-content-center p-2 rounded" title="Lock System">
-                        <Icon path="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            <div className="d-flex gap-1 mt-1 bg-secondary bg-opacity-10 p-1 rounded">
+                {MONTHS.map(m => (
+                    <button 
+                        key={m.id} onClick={() => { setActiveMonthKey(m.id); setLogDate(1); setFocusDay(1); setSelectedId(null); }}
+                        className={`btn btn-sm py-1 flex-grow-1 text-center fw-bold border-0`}
+                        style={{
+                            fontSize: '11px',
+                            backgroundColor: activeMonthKey === m.id ? '#ffffff' : 'transparent',
+                            color: activeMonthKey === m.id ? 'var(--brand-600)' : '#6c757d',
+                            boxShadow: activeMonthKey === m.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
+                        }}
+                    >{m.label}</button>
+                ))}
+            </div>
+            
+            <div className="d-flex flex-column gap-1.5 mt-2">
+                <div className="d-flex gap-2">
+                    <input type="file" accept=".csv" className="d-none" ref={fileRef} onChange={handleImport} />
+                    <button onClick={() => fileRef.current.click()} className="btn btn-sm btn-light border flex-grow-1 fw-bold text-secondary d-flex align-items-center justify-content-center gap-1 shadow-sm" style={{ fontSize: '10px' }}>
+                        <Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/> Import
+                    </button>
+                    <button onClick={() => { const e = defaultEmp(activeConf); setDb([e, ...db]); setActiveTab('employees'); setSelectedId(e.id); }} className="btn btn-sm btn-primary px-3 d-flex align-items-center justify-content-center shadow-sm" title="Add New">
+                        <Icon path="M12 4v16m8-8H4"/>
+                    </button>
+                </div>
+                <div className="d-flex gap-1">
+                    <button onClick={handleExportInOutExcel} className="btn btn-sm btn-light border text-primary flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#eef2ff' }} title="Download Special IN/OUT Time Sheet">
+                        <Icon path="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '12px', height: '12px' }}/> IN/OUT Log
+                    </button>
+                    <button onClick={handleExportExcel} className="btn btn-sm btn-light border text-success flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#ecfdf5' }} title="Detailed Attendance Sheet">
+                        <Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" style={{ width: '12px', height: '12px' }}/> Full Excel
+                    </button>
+                    <button onClick={() => setPdfModal({ show: true, hideBasic: false })} className="btn btn-sm btn-light border text-danger flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#fff5f5' }} title="Verification Summary Print">
+                        <Icon path="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" style={{ width: '12px', height: '12px' }}/> PDF Print
                     </button>
                 </div>
 
-                <div className="d-flex gap-1 mt-1 bg-secondary bg-opacity-10 p-1 rounded">
-                    {MONTHS.map(m => (
-                        <button 
-                            key={m.id} onClick={() => { setActiveMonthKey(m.id); setLogDate(1); setFocusDay(1); setSelectedId(null); }}
-                            className={`btn btn-sm py-1 flex-grow-1 text-center fw-bold border-0`}
-                            style={{
-                                fontSize: '11px',
-                                backgroundColor: activeMonthKey === m.id ? '#ffffff' : 'transparent',
-                                color: activeMonthKey === m.id ? 'var(--brand-600)' : '#6c757d',
-                                boxShadow: activeMonthKey === m.id ? '0 1px 3px rgba(0,0,0,0.1)' : 'none'
-                            }}
-                        >{m.label}</button>
+                {/* Local Folder Synchronization Integration (Permanent System Backup) */}
+                <div className="border-top pt-2 mt-1">
+                    {!dirHandle ? (
+                        <button onClick={selectLocalDirectory} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-outline-secondary" style={{ fontSize: '10px', height: '32px' }}>
+                            <Icon path="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
+                            Link Local Sync Folder
+                        </button>
+                    ) : !isDirGranted ? (
+                        <button onClick={triggerLocalUnlock} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-warning bg-opacity-25 border-warning text-warning-emphasis" style={{ fontSize: '10px', height: '32px' }}>
+                            <Icon path="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                            🔒 Unlock Workspace Folder
+                        </button>
+                    ) : (
+                        <button onClick={selectLocalDirectory} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-success bg-opacity-10 text-success border-success" style={{ fontSize: '10px', height: '32px' }}>
+                            <Icon path="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            🟢 Folder Synced & Active
+                        </button>
+                    )}
+                </div>
+            </div>
+
+            <div className="d-flex bg-secondary bg-opacity-10 p-1 rounded mt-1 gap-1">
+                <button onClick={() => setActiveTab('employees')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'employees' ? '#ffffff' : 'transparent', color: activeTab === 'employees' ? '#212529' : '#6c757d', boxShadow: activeTab === 'employees' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Employees</button>
+                <button onClick={() => setActiveTab('logs')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'logs' ? '#ffffff' : 'transparent', color: activeTab === 'logs' ? '#212529' : '#6c757d', boxShadow: activeTab === 'logs' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Daily Logs</button>
+                <button onClick={() => setActiveTab('dashboard')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'dashboard' ? '#ffffff' : 'transparent', color: activeTab === 'dashboard' ? '#212529' : '#6c757d', boxShadow: activeTab === 'dashboard' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Analytics</button>
+            </div>
+        </div>
+        
+        {activeTab === 'employees' ? (
+            <>
+                <div className="p-3 bg-light border-bottom flex-shrink-0">
+                    <div className="position-relative">
+                        <Icon path="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" className="text-secondary position-absolute" style={{ left: '10px', top: '10px', width: '16px', height: '16px' }} />
+                        <input type="text" placeholder="Search employee..." value={search} onChange={e => setSearch(e.target.value)} className="form-control form-control-sm ps-5 bg-white border rounded shadow-sm" style={{ height: '36px', fontSize: '13px' }} />
+                    </div>
+                    <div className="d-flex justify-content-between align-items-center mt-3 small fw-bold text-secondary text-uppercase" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>
+                        <span>{filtered.length} People</span>
+                        <button onClick={handleResetSystem} className="btn btn-link btn-sm text-danger p-0 border-0 text-decoration-none" style={{ fontSize: '10px' }}>Reset Month</button>
+                    </div>
+                </div>
+                <div className="flex-grow-1 overflow-auto p-2 bg-light d-flex flex-column gap-1 hide-scroll">
+                    {filtered.length === 0 && (
+                        <div className="d-flex flex-column align-items-center justify-content-center p-3 text-center">
+                            <div className="small text-muted fw-semibold mb-3">No records found for {activeConf.label}.</div>
+                            {dbs[MONTHS.find(m => m.id !== activeMonthKey).id]?.length > 0 && (
+                                <button onClick={handleMigrateEmployees} className="btn btn-sm btn-light border text-brand-600 w-100 fw-bold d-flex align-items-center justify-content-center gap-2 p-3 rounded shadow-sm" style={{ fontSize: '11px', backgroundColor: '#eff6ff' }}>
+                                    <Icon path="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" style={{ width: '16px', height: '16px' }}/>
+                                    Migrate Workforce Forward
+                                </button>
+                            )}
+                        </div>
+                    )}
+                    {filtered.map((emp) => (
+                        <div key={emp.id} onClick={() => setSelectedId(emp.id)} className="p-3 rounded border cursor-pointer transition-all" style={{
+                            backgroundColor: selectedId === emp.id ? '#ffffff' : 'transparent',
+                            borderColor: selectedId === emp.id ? 'var(--brand-500)' : 'transparent',
+                            boxShadow: selectedId === emp.id ? '0 4px 6px rgba(59, 130, 246, 0.1)' : 'none',
+                        }}>
+                            <div className="d-flex justify-content-between align-items-start mb-1">
+                                <h3 className="fw-bold mb-0 text-truncate text-dark" style={{ fontSize: '13px', maxWidth: '170px' }}>{emp.name}</h3>
+                                <span className="badge bg-secondary bg-opacity-10 text-secondary" style={{ fontSize: '9px' }}>{emp.code}</span>
+                            </div>
+                            <div className="d-flex justify-content-between align-items-center mt-2">
+                                <div className="d-flex gap-2">
+                                    <span className="small fw-semibold text-success d-flex align-items-center gap-1" style={{ fontSize: '11px' }}><Icon path="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '14px', height: '14px' }}/> {emp.workingDays}</span>
+                                    <span className="small fw-semibold text-danger d-flex align-items-center gap-1" style={{ fontSize: '11px' }}><Icon path="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '14px', height: '14px' }}/> {emp.absent}</span>
+                                </div>
+                                <span className="fw-bold text-dark" style={{ fontSize: '12px' }}>₹{emp.salaryToBePaid.toLocaleString(undefined, {maximumFractionDigits:0})}</span>
+                            </div>
+                        </div>
                     ))}
                 </div>
-                
-                <div className="d-flex flex-column gap-1.5 mt-2">
-                    <div className="d-flex gap-2">
-                        <input type="file" accept=".csv" className="d-none" ref={fileRef} onChange={handleImport} />
-                        <button onClick={() => fileRef.current.click()} className="btn btn-sm btn-light border flex-grow-1 fw-bold text-secondary d-flex align-items-center justify-content-center gap-1 shadow-sm" style={{ fontSize: '10px' }}>
-                            <Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/> Import
-                        </button>
-                        <button onClick={() => { const e = defaultEmp(activeConf); setDb([e, ...db]); setActiveTab('employees'); setSelectedId(e.id); }} className="btn btn-sm btn-primary px-3 d-flex align-items-center justify-content-center shadow-sm" title="Add New">
-                            <Icon path="M12 4v16m8-8H4"/>
-                        </button>
-                    </div>
-                    <div className="d-flex gap-1">
-                        <button onClick={handleExportInOutExcel} className="btn btn-sm btn-light border text-primary flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#eef2ff' }} title="Download Special IN/OUT Time Sheet">
-                            <Icon path="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '12px', height: '12px' }}/> IN/OUT Log
-                        </button>
-                        <button onClick={handleExportExcel} className="btn btn-sm btn-light border text-success flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#ecfdf5' }} title="Detailed Attendance Sheet">
-                            <Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" style={{ width: '12px', height: '12px' }}/> Full Excel
-                        </button>
-                        <button onClick={() => setPdfModal({ show: true, hideBasic: false })} className="btn btn-sm btn-light border text-danger flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#fff5f5' }} title="Verification Summary Print">
-                            <Icon path="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" style={{ width: '12px', height: '12px' }}/> PDF Print
-                        </button>
-                    </div>
-
-                    {/* Local Folder Synchronization Integration (Permanent System Backup) */}
-                    <div className="border-top pt-2 mt-1">
-                        {!dirHandle ? (
-                            <button onClick={selectLocalDirectory} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-outline-secondary" style={{ fontSize: '10px', height: '32px' }}>
-                                <Icon path="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z" />
-                                Link Local Sync Folder
-                            </button>
-                        ) : !isDirGranted ? (
-                            <button onClick={triggerLocalUnlock} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-warning bg-opacity-25 border-warning text-warning-emphasis" style={{ fontSize: '10px', height: '32px' }}>
-                                <Icon path="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-                                🔒 Unlock Workspace Folder
-                            </button>
-                        ) : (
-                            <button onClick={selectLocalDirectory} className="btn btn-sm w-100 fw-bold d-flex align-items-center justify-content-center gap-1 btn-success bg-opacity-10 text-success border-success" style={{ fontSize: '10px', height: '32px' }}>
-                                <Icon path="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                🟢 Folder Synced & Active
-                            </button>
-                        )}
-                    </div>
-                </div>
-
-                <div className="d-flex bg-secondary bg-opacity-10 p-1 rounded mt-1 gap-1">
-                    <button onClick={() => setActiveTab('employees')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'employees' ? '#ffffff' : 'transparent', color: activeTab === 'employees' ? '#212529' : '#6c757d', boxShadow: activeTab === 'employees' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Employees</button>
-                    <button onClick={() => setActiveTab('logs')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'logs' ? '#ffffff' : 'transparent', color: activeTab === 'logs' ? '#212529' : '#6c757d', boxShadow: activeTab === 'logs' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Daily Logs</button>
-                    <button onClick={() => setActiveTab('dashboard')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'dashboard' ? '#ffffff' : 'transparent', color: activeTab === 'dashboard' ? '#212529' : '#6c757d', boxShadow: activeTab === 'dashboard' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Analytics</button>
-                </div>
-            </div>
-            
-            {activeTab === 'employees' ? (
-                <>
-                    <div className="p-3 bg-light border-bottom flex-shrink-0">
-                        <div className="position-relative">
-                            <Icon path="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" className="text-secondary position-absolute" style={{ left: '10px', top: '10px', width: '16px', height: '16px' }} />
-                            <input type="text" placeholder="Search employee..." value={search} onChange={e => setSearch(e.target.value)} className="form-control form-control-sm ps-5 bg-white border rounded shadow-sm" style={{ height: '36px', fontSize: '13px' }} />
-                        </div>
-                        <div className="d-flex justify-content-between align-items-center mt-3 small fw-bold text-secondary text-uppercase" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>
-                            <span>{filtered.length} People</span>
-                            <button onClick={handleResetSystem} className="btn btn-link btn-sm text-danger p-0 border-0 text-decoration-none" style={{ fontSize: '10px' }}>Reset Month</button>
-                        </div>
-                    </div>
-                    <div className="flex-grow-1 overflow-auto p-2 bg-light d-flex flex-column gap-1 hide-scroll">
-                        {filtered.length === 0 && (
-                            <div className="d-flex flex-column align-items-center justify-content-center p-3 text-center">
-                                <div className="small text-muted fw-semibold mb-3">No records found for {activeConf.label}.</div>
-                                {dbs[MONTHS.find(m => m.id !== activeMonthKey).id]?.length > 0 && (
-                                    <button onClick={handleMigrateEmployees} className="btn btn-sm btn-light border text-brand-600 w-100 fw-bold d-flex align-items-center justify-content-center gap-2 p-3 rounded shadow-sm" style={{ fontSize: '11px', backgroundColor: '#eff6ff' }}>
-                                        <Icon path="M8 7v8a2 2 0 002 2h6M8 7V5a2 2 0 012-2h4.586a1 1 0 01.707.293l4.414 4.414a1 1 0 01.293.707V15a2 2 0 01-2 2h-2M8 7H6a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2v-2" style={{ width: '16px', height: '16px' }}/>
-                                        Migrate Workforce Forward
-                                    </button>
-                                )}
-                            </div>
-                        )}
-                        {filtered.map((emp) => (
-                            <div key={emp.id} onClick={() => setSelectedId(emp.id)} className="p-3 rounded border cursor-pointer transition-all" style={{
-                                backgroundColor: selectedId === emp.id ? '#ffffff' : 'transparent',
-                                borderColor: selectedId === emp.id ? 'var(--brand-500)' : 'transparent',
-                                boxShadow: selectedId === emp.id ? '0 4px 6px rgba(59, 130, 246, 0.1)' : 'none',
-                            }}>
-                                <div className="d-flex justify-content-between align-items-start mb-1">
-                                    <h3 className="fw-bold mb-0 text-truncate text-dark" style={{ fontSize: '13px', maxWidth: '170px' }}>{emp.name}</h3>
-                                    <span className="badge bg-secondary bg-opacity-10 text-secondary" style={{ fontSize: '9px' }}>{emp.code}</span>
-                                </div>
-                                <div className="d-flex justify-content-between align-items-center mt-2">
-                                    <div className="d-flex gap-2">
-                                        <span className="small fw-semibold text-success d-flex align-items-center gap-1" style={{ fontSize: '11px' }}><Icon path="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '14px', height: '14px' }}/> {emp.workingDays}</span>
-                                        <span className="small fw-semibold text-danger d-flex align-items-center gap-1" style={{ fontSize: '11px' }}><Icon path="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '14px', height: '14px' }}/> {emp.absent}</span>
-                                    </div>
-                                    <span className="fw-bold text-dark" style={{ fontSize: '12px' }}>₹{emp.salaryToBePaid.toLocaleString(undefined, {maximumFractionDigits:0})}</span>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </>
-            ) : activeTab === 'logs' ? (
-                <>
-                    <div className="p-3 bg-light border-bottom flex-shrink-0">
-                        <span className="small fw-bold text-secondary text-uppercase" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Select Log Date</span>
-                    </div>
-                    <div className="flex-grow-1 overflow-auto p-2 bg-light d-flex flex-column gap-1 hide-scroll">
-                        {Array.from({ length: activeConf.days }, (_, i) => i + 1).map(day => (
-                            <div key={day} onClick={() => setLogDate(day)} className="p-3 rounded border cursor-pointer transition-all" style={{
-                                backgroundColor: logDate === day ? '#ffffff' : 'transparent',
-                                borderColor: logDate === day ? 'var(--brand-500)' : 'transparent',
-                                boxShadow: logDate === day ? '0 4px 6px rgba(59, 130, 246, 0.1)' : 'none',
-                            }}>
-                                <div className="d-flex justify-content-between align-items-center">
-                                    <h3 className="fw-bold mb-0 text-dark" style={{ fontSize: '13px' }}>{activeConf.label.split(' ')[0]} {String(day).padStart(2, '0')}, {activeConf.label.split(' ')[1]}</h3>
-                                    <span className={`badge ${activeConf.weekends.includes(day) ? 'bg-warning bg-opacity-25 text-warning-emphasis' : 'bg-secondary bg-opacity-10 text-secondary'}`} style={{ fontSize: '9px' }}>{DAY_NAMES[(activeConf.startOffset + day - 1) % 7]}</span>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </>
-            ) : (
-                <div className="flex-grow-1 bg-light d-flex flex-column p-4 align-items-center justify-content-center text-center">
-                    <div className="rounded bg-brand-50 d-flex align-items-center justify-content-center mb-3 shadow-inner" style={{ width: '70px', height: '70px' }}><Icon path="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" className="text-brand-600" style={{ width: '36px', height: '36px' }} /></div>
-                    <h2 className="h5 fw-bold text-dark mb-2">Analytics Active</h2>
-                    <p className="small text-muted mb-3" style={{ fontSize: '12px' }}>View detailed company statistics on the main panel.</p>
-                    <p className="badge bg-secondary bg-opacity-10 text-secondary fw-semibold p-2 mb-0" style={{ fontSize: '10px' }}>Press 'Esc' to return to Employees</p>
-                </div>
-            )}
-        </div>
-
-        {/* Main Content Area */}
-        <div className="flex-grow-1 d-flex flex-column bg-light overflow-hidden h-100 position-relative">
-        {activeTab === 'dashboard' ? (
-            <OwnerDashboard db={db} activeConf={activeConf} />
+            </>
         ) : activeTab === 'logs' ? (
-            <div className="flex-grow-1 d-flex flex-column h-100 overflow-hidden">
-                <div className="bg-white border-bottom p-4 z-1 flex-shrink-0 shadow-sm">
-                    <div className="d-flex justify-content-between align-items-start">
-                        <div>
-                            <h2 className="h4 fw-bold text-dark mb-0">Daily Log: {activeConf.label.split(' ')[0]} {logDate}, {activeConf.label.split(' ')[1]}</h2>
-                            <p className="small text-muted mb-0 fw-semibold mt-1">{DAY_NAMES[(activeConf.startOffset + logDate - 1) % 7]}</p>
-                        </div>
-                        <div className="badge bg-light text-secondary border fw-bold p-2 d-none d-md-block" style={{ fontSize: '10px' }}>Press 'Esc' to close</div>
-                    </div>
-                    
-                    {(() => {
-                        let p=0, a=0, h=0, t=0, wo=0, l=0, pMiss=0, otTotal=0;
-                        db.forEach(emp => {
-                            const val = emp[`d${logDate}`] || (emp.autoWoDays?.[logDate] === "W/O" ? "W/O" : "");
-                            const aVal = String(val).trim().toUpperCase();
-                            const isE = String(emp.type || "").trim().toUpperCase() === "E";
-                            const isSunday = activeConf.weekends.includes(logDate);
-                            let getsExtraWo = false;
-                            if (isE && isSunday && aVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(aVal)) getsExtraWo = true;
-
-                            if (aVal === 'P') p++;
-                            else if (aVal === 'P?') { p++; pMiss++; } 
-                            else if (aVal === 'A') a++;
-                            else if (aVal === 'H' || aVal === '0.5') h++;
-                            else if (aVal === 'T') t++;
-                            else if (aVal === 'W/O') wo++;
-                            else if (aVal === 'L') l++;
-
-                            if (getsExtraWo) wo++;
-                            const ot = parseFloat(emp[`ot${logDate}`]);
-                            if(!isNaN(ot)) otTotal += ot;
-                        });
-
-                        return (
-                            <div className="row g-2 mt-4 border-top pt-4">
-                                <div className="col-6 col-md-4 col-lg-2">
-                                    <div className="p-3 bg-success bg-opacity-10 rounded border border-success border-opacity-10">
-                                        <div className="fw-bold text-success text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Present</div>
-                                        <div className="h4 fw-bold text-success mb-0">{p}</div>
-                                    </div>
-                                </div>
-                                <div className="col-6 col-md-4 col-lg-2">
-                                    <div className="p-3 bg-status-l bg-opacity-10 rounded border border-indigo border-opacity-10">
-                                        <div className="fw-bold text-indigo text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Paid Leaves</div>
-                                        <div className="h4 fw-bold text-indigo mb-0">{l}</div>
-                                    </div>
-                                </div>
-                                <div className="col-6 col-md-4 col-lg-2">
-                                    <div className="p-3 bg-warning bg-opacity-10 rounded border border-warning border-opacity-10">
-                                        <div className="fw-bold text-warning-emphasis text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Half Day</div>
-                                        <div className="h4 fw-bold text-warning mb-0">{h}</div>
-                                    </div>
-                                </div>
-                                <div className="col-6 col-md-4 col-lg-2">
-                                    <div className="p-3 bg-danger bg-opacity-10 rounded border border-danger border-opacity-10">
-                                        <div className="fw-bold text-danger text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Absent</div>
-                                        <div className="h4 fw-bold text-danger mb-0">{a}</div>
-                                    </div>
-                                </div>
-                                <div className="col-6 col-md-4 col-lg-2">
-                                    <div className="p-3 bg-info bg-opacity-10 rounded border border-info border-opacity-10">
-                                        <div className="fw-bold text-info-emphasis text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Tour</div>
-                                        <div className="h4 fw-bold text-info mb-0">{t}</div>
-                                    </div>
-                                </div>
-                                <div className="col-6 col-md-4 col-lg-1">
-                                    <div className="p-3 bg-primary bg-opacity-10 rounded border border-primary border-opacity-10">
-                                        <div className="fw-bold text-primary text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>W/O</div>
-                                        <div className="h4 fw-bold text-primary mb-0">{wo}</div>
-                                    </div>
-                                </div>
-                                <div className="col-6 col-md-4 col-lg-1">
-                                    <div className="p-3 bg-brand-50 rounded border border-brand-100">
-                                        <div className="fw-bold text-brand-600 text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>OT (Hrs)</div>
-                                        <div className="h4 fw-bold text-brand-600 mb-0">{otTotal}</div>
-                                    </div>
-                                </div>
+            <>
+                <div className="p-3 bg-light border-bottom flex-shrink-0">
+                    <span className="small fw-bold text-secondary text-uppercase" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Select Log Date</span>
+                </div>
+                <div className="flex-grow-1 overflow-auto p-2 bg-light d-flex flex-column gap-1 hide-scroll">
+                    {Array.from({ length: activeConf.days }, (_, i) => i + 1).map(day => (
+                        <div key={day} onClick={() => setLogDate(day)} className="p-3 rounded border cursor-pointer transition-all" style={{
+                            backgroundColor: logDate === day ? '#ffffff' : 'transparent',
+                            borderColor: logDate === day ? 'var(--brand-500)' : 'transparent',
+                            boxShadow: logDate === day ? '0 4px 6px rgba(59, 130, 246, 0.1)' : 'none',
+                        }}>
+                            <div className="d-flex justify-content-between align-items-center">
+                                <h3 className="fw-bold mb-0 text-dark" style={{ fontSize: '13px' }}>{activeConf.label.split(' ')[0]} {String(day).padStart(2, '0')}, {activeConf.label.split(' ')[1]}</h3>
+                                <span className={`badge ${activeConf.weekends.includes(day) ? 'bg-warning bg-opacity-25 text-warning-emphasis' : 'bg-secondary bg-opacity-10 text-secondary'}`} style={{ fontSize: '9px' }}>{DAY_NAMES[(activeConf.startOffset + day - 1) % 7]}</span>
                             </div>
-                        );
-                    })()}
-                </div>
-
-                <div className="flex-grow-1 overflow-auto p-4 bg-light">
-                    <div className="card border shadow-sm rounded-3 overflow-hidden bg-white">
-                        <div className="table-responsive">
-                            <table className="table table-hover align-middle mb-0">
-                                <thead className="table-light text-secondary text-uppercase" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>
-                                    <tr>
-                                        <th className="p-3 fw-bold">Employee Details</th>
-                                        <th className="p-3 fw-bold">Code</th>
-                                        <th className="p-3 fw-bold">Attendance Status</th>
-                                        <th className="p-3 fw-bold">In / Out Time</th>
-                                        <th className="p-3 fw-bold">Overtime (OT)</th>
-                                    </tr>
-                                </thead>
-                                <tbody className="text-dark" style={{ fontSize: '13px' }}>
-                                    {db.map(emp => {
-                                        const manualVal = emp[`d${logDate}`];
-                                        const autoWoVal = !manualVal && emp.autoWoDays?.[logDate] === "W/O" ? "W/O" : "";
-                                        const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
-                                        const otVal = emp[`ot${logDate}`];
-                                        return (
-                                            <tr key={emp.id}>
-                                                <td className="p-3 fw-bold text-dark">{emp.name}</td>
-                                                <td className="p-3 fw-bold text-secondary">{emp.code}</td>
-                                                <td className="p-3">
-                                                    <span className={`badge ${aVal ? getAttColor(aVal).replace('bg-status-p', 'bg-success').replace('bg-status-a', 'bg-danger').replace('bg-status-l', 'bg-status-l text-white').replace('bg-status-h', 'bg-warning text-dark').replace('bg-slate-100', 'bg-secondary bg-opacity-10 text-secondary').replace('text-white', '') : 'bg-secondary bg-opacity-10 text-secondary'}`} style={{ fontSize: '10px', padding: '6px 10px' }}>
-                                                        {aVal || 'UNMARKED'}
-                                                    </span>
-                                                </td>
-                                                <td className="p-3 fw-bold text-secondary" style={{ fontSize: '11px' }}>
-                                                    {emp[`in${logDate}`] && <div className="text-success">IN: {emp[`in${logDate}`]}</div>}
-                                                    {emp[`out${logDate}`] && <div className="text-danger">OUT: {emp[`out${logDate}`]}</div>}
-                                                    {!emp[`in${logDate}`] && !emp[`out${logDate}`] && '-'}
-                                                </td>
-                                                <td className="p-3">
-                                                    {otVal ? <span className={`badge border ${parseFloat(otVal) < 0 ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-10' : 'bg-brand-100 text-brand-700 border-brand-200'}`} style={{ fontSize: '10px' }}>{otVal} Hrs</span> : '-'}
-                                                </td>
-                                            </tr>
-                                        )
-                                    })}
-                                </tbody>
-                            </table>
                         </div>
-                    </div>
+                    ))}
                 </div>
-            </div>
-        ) : !activeEmp ? (
-            <div className="flex-grow-1 d-flex flex-column align-items-center justify-content-center text-secondary">
-                <div className="rounded-4 bg-secondary bg-opacity-10 d-flex align-items-center justify-content-center mb-4" style={{ width: '90px', height: '90px' }}>
-                    <Icon path="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" style={{ width: '48px', height: '48px', color: '#6c757d' }} />
-                </div>
-                <h2 className="h4 fw-bold text-secondary mb-2">Select an Employee</h2>
-                <p className="small text-muted text-center mb-0" style={{ maxWidth: '280px' }}>Use the sidebar to choose an employee, or start typing to search.</p>
-            </div>
+            </>
         ) : (
-            <div className="flex-grow-1 d-flex flex-column h-100 overflow-hidden">
-                <div className="bg-white border-bottom p-4 z-1 flex-shrink-0 shadow-sm">
-                    <div className="d-flex justify-content-between align-items-start">
-                        <div className="d-flex align-items-center gap-3">
-                            <div className="rounded text-white d-flex align-items-center justify-content-center text-uppercase fw-bold" style={{ width: '60px', height: '60px', fontSize: '24px', background: 'linear-gradient(135deg, var(--brand-500), var(--brand-700))' }}>{activeEmp.name.charAt(0)}</div>
-                            <div>
-                                <input type="text" value={activeEmp.name} onChange={e => updateActive({name: e.target.value})} className="form-control form-control-lg fw-bold border-0 p-0 mb-1 text-dark" style={{ fontSize: '24px', outline: 'none', background: 'transparent', boxShadow: 'none' }} />
-                                <div className="d-flex flex-wrap align-items-center gap-1">
-                                    <input type="text" value={activeEmp.code} onChange={e => updateActive({code: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '90px', fontSize: '11px' }} />
-                                    <input type="text" value={activeEmp.dept} onChange={e => updateActive({dept: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '120px', fontSize: '11px' }} />
-                                    <input type="text" value={activeEmp.type} onChange={e => updateActive({type: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '50px', fontSize: '11px' }} placeholder="Type" />
-                                    <input type="date" value={activeEmp.joiningDate || ""} onChange={e => updateActive({joiningDate: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '130px', fontSize: '11px' }} title="Joining Date" />
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div className="mt-4 d-flex flex-wrap gap-4 border-top pt-3">
-                        <div className="d-flex flex-column"><span className="small text-muted text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Working/Paid Days</span><span className="h5 fw-bold text-dark mb-0">{activeEmp.workingDays}</span></div>
-                        <div className="d-flex flex-column"><span className="small text-success text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Present (P)</span><span className="h5 fw-bold text-success mb-0">{activeEmp.pOnly}</span></div>
-                        <div className="d-flex flex-column"><span className="small text-brand-600 text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Paid Leave (L)</span><span className="h5 fw-bold text-brand-600 mb-0">{activeEmp.leave || 0}</span></div>
-                        <div className="d-flex flex-column"><span className="small text-warning text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Missing (P?)</span><span className="h5 fw-bold text-warning mb-0">{activeEmp.pMiss}</span></div>
-                        <div className="d-flex flex-column"><span className="small text-brand-600 text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Total OT</span><span className="h5 fw-bold text-brand-600 mb-0">{activeEmp.otHrs}h</span></div>
-                    </div>
-
-                    {/* Normalized Metrics Row Layout via responsive row columns */}
-                    <div className="row row-cols-2 row-cols-md-5 g-2 mt-3">
-                        <div className="col">
-                            <div className="p-3 bg-light rounded border h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
-                                <div className="small text-muted text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Basic Salary</div>
-                                <div className="d-flex align-items-center"><span className="text-secondary fw-bold me-1">₹</span><input type="number" value={activeEmp.basicSalary || ""} onChange={e => updateActive({basicSalary: e.target.value})} className="form-control form-control-sm fw-bold border-0 p-0 text-dark bg-transparent shadow-none" style={{ fontSize: '15px', outline: 'none' }} /></div>
-                            </div>
-                        </div>
-                        <div className="col">
-                            <div className="p-3 bg-success bg-opacity-10 rounded border border-success border-opacity-10 h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
-                                <div className="small text-success text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Earned Pay</div>
-                                <div className="d-flex align-items-center"><span className="text-success fw-bold me-1">₹</span><span className="fw-bold text-success" style={{ fontSize: '15px' }}>{activeEmp.actualMonthly.toLocaleString(undefined, {maximumFractionDigits:0})}</span></div>
-                            </div>
-                        </div>
-                        <div className="col">
-                            <div className="p-3 bg-light rounded border h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
-                                <div className="small text-muted text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Prev Balance</div>
-                                <div className="d-flex align-items-center"><span className="text-secondary fw-bold me-1">₹</span><input type="number" value={activeEmp.previousBalance || ""} onChange={e => updateActive({previousBalance: e.target.value})} className="form-control form-control-sm fw-bold border-0 p-0 text-dark bg-transparent shadow-none" style={{ fontSize: '15px', outline: 'none' }} /></div>
-                            </div>
-                        </div>
-                        <div className="col">
-                            <div className="p-3 bg-danger bg-opacity-10 rounded border border-danger border-opacity-10 h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
-                                <div className="small text-danger text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Advance Deduct</div>
-                                <div className="d-flex align-items-center"><span className="text-danger fw-bold me-1">₹</span><input type="number" value={activeEmp.advance || ""} onChange={e => updateActive({advance: e.target.value})} className="form-control form-control-sm fw-bold border-0 p-0 text-dark bg-transparent shadow-none" style={{ fontSize: '15px', outline: 'none' }} /></div>
-                            </div>
-                        </div>
-                        <div className="col">
-                            <div className="p-3 bg-dark text-white rounded border d-flex flex-column justify-content-between shadow h-100" style={{ minHeight: '80px' }}>
-                                <div className="small text-secondary text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Final Payout</div>
-                                <div className="d-flex align-items-center"><span className="text-secondary fw-bold me-1">₹</span><span className="fw-bold text-white" style={{ fontSize: '16px' }}>{activeEmp.salaryToBePaid.toLocaleString(undefined, {maximumFractionDigits:0})}</span></div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                {/* Calendar Day grid */}
-                <div className="flex-grow-1 overflow-auto p-4 bg-light" onClick={() => { if(!focusDay) setFocusDay(1); }}>
-                    <div className="d-flex align-items-center justify-content-between mb-3">
-                        <h3 className="h6 fw-bold text-dark mb-0">{activeConf.label} Register</h3>
-                        <div className="d-flex align-items-center gap-2 bg-white px-3 py-2 rounded border shadow-sm" style={{ fontSize: '11px', fontWeight: 'bold' }}>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">P</kbd> Prs (Time)</span>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">L</kbd> Paid Leave</span>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">A</kbd> Abs</span>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">H</kbd> Half</span>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">T</kbd> Tour</span>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">O</kbd> OT</span>
-                            <span className="text-secondary"><kbd className="bg-light text-dark border">⌫</kbd> Clr</span>
-                        </div>
-                    </div>
-
-                    <div className="grid-7 pb-5">
-                        {DAY_NAMES.map(d => <div key={d} className="text-center small fw-bold text-secondary text-uppercase" style={{ letterSpacing: '0.5px', fontSize: '10px' }}>{d}</div>)}
-                        
-                        {Array.from({ length: activeConf.startOffset }).map((_, i) => <div key={`empty-${i}`} className="opacity-0"></div>)}
-                        {Array.from({ length: activeConf.days }, (_, i) => {
-                            const dNum = i + 1;
-                            const isWk = activeConf.weekends.includes(dNum);
-                            const manualVal = activeEmp[`d${dNum}`];
-                            const autoWoVal = !manualVal && activeEmp.autoWoDays?.[dNum] === "W/O" ? "W/O" : "";
-                            const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
-                            const isAutoWo = !manualVal && autoWoVal === "W/O";
-                            const isE = String(activeEmp.type || "").trim().toUpperCase() === "E";
-                            const getsExtraWo = isWk && isE && manualVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(String(manualVal).toUpperCase());
-                            const oVal = activeEmp[`ot${dNum}`];
-                            const cVal = activeEmp[`c${dNum}`];
-                            const inVal = activeEmp[`in${dNum}`];
-                            const outVal = activeEmp[`out${dNum}`];
-                            
-                            let customBg = "bg-white";
-                            let textClass = "text-dark";
-                            if (aVal === 'P') { customBg = "bg-success text-white border-success"; textClass="text-white"; }
-                            else if (aVal === 'P?') { customBg = "bg-warning text-dark border-warning"; textClass="text-dark"; }
-                            else if (aVal === 'A') { customBg = "bg-danger text-white border-danger"; textClass="text-white"; }
-                            else if (aVal === '0.5' || aVal === 'H') { customBg = "bg-warning text-dark border-warning"; textClass="text-dark"; }
-                            else if (aVal === 'T') { customBg = "bg-info text-white border-info"; textClass="text-white"; }
-                            else if (aVal === 'W/O') { customBg = "bg-primary text-white border-primary"; textClass="text-white"; }
-                            else if (aVal === 'L') { customBg = "bg-status-l text-white border-status-l"; textClass="text-white"; }
-                            else if (isWk) { customBg = "bg-warning bg-opacity-10 border-light"; }
-
-                            return (
-                                <div id={`day-${dNum}`} key={dNum} tabIndex={0} onClick={() => setFocusDay(dNum)} className="day-card position-relative rounded border p-2 bg-white d-flex flex-column justify-content-between" style={{
-                                    height: '110px',
-                                    cursor: 'pointer',
-                                    transition: 'all 0.15s ease',
-                                    outline: 'none',
-                                    borderWidth: '2px',
-                                    borderColor: focusDay === dNum ? 'var(--brand-500)' : '#dee2e6',
-                                    boxShadow: focusDay === dNum ? '0 0 0 4px rgba(59, 130, 246, 0.2)' : 'none',
-                                    backgroundColor: isWk && !aVal ? '#fffbeb' : '#ffffff'
-                                }}>
-                                    <span className="small fw-bold text-secondary position-absolute" style={{ top: '8px', left: '10px' }}>{dNum}</span>
-                                    {cVal && (
-                                        <div className="position-absolute text-primary bg-primary bg-opacity-10 p-1 rounded z-2" style={{ top: '8px', right: '10px', cursor: 'pointer' }} title={cVal} onClick={(e) => { e.stopPropagation(); setFocusDay(dNum); setCommentModal({ show: true, day: dNum, val: cVal }); }}>
-                                            <Icon path="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" style={{ width: '14px', height: '14px' }}/>
-                                        </div>
-                                    )}
-                                    
-                                    <div className="flex-grow-1 d-flex flex-column align-items-center justify-content-center mt-3 gap-1">
-                                        <div className="d-flex align-items-center gap-1">
-                                            <div className={`rounded d-flex align-items-center justify-content-center fw-bold ${customBg}`} style={{
-                                                width: '32px',
-                                                height: '32px',
-                                                fontSize: '12px',
-                                                border: isAutoWo ? '2px dashed var(--brand-500)' : '1px solid transparent',
-                                                opacity: isAutoWo ? 0.7 : 1,
-                                                color: isAutoWo ? 'var(--brand-600)' : 'inherit'
-                                            }}>{aVal || '-'}</div>
-                                            {oVal && <div className={`badge border ${parseFloat(oVal) < 0 ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-10' : 'bg-brand-100 text-brand-700 border-brand-200'}`} style={{ fontSize: '9px' }}>{oVal}h</div>}
-                                        </div>
-                                        
-                                        {(inVal || outVal) && (
-                                            <div className="fw-bold text-secondary text-center mt-1" style={{ fontSize: '9px', lineHeight: '1.2' }}>
-                                                {inVal && <div className="text-success">↑ {inVal}</div>}
-                                                {outVal && <div className="text-danger">↓ {outVal}</div>}
-                                            </div>
-                                        )}
-                                    </div>
-                                    {getsExtraWo && <div className="position-absolute bottom-0 start-0 end-0 text-center pb-1"><span className="badge bg-primary bg-opacity-10 text-primary uppercase fw-bold" style={{ fontSize: '8px' }}>+ W/O</span></div>}
-                                </div>
-                            );
-                        })}
-                    </div>
-                </div>
+            <div className="flex-grow-1 bg-light d-flex flex-column p-4 align-items-center justify-content-center text-center">
+                <div className="rounded bg-brand-50 d-flex align-items-center justify-content-center mb-3 shadow-inner" style={{ width: '70px', height: '70px' }}><Icon path="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" className="text-brand-600" style={{ width: '36px', height: '36px' }} /></div>
+                <h2 className="h5 fw-bold text-dark mb-2">Analytics Active</h2>
+                <p className="small text-muted mb-3" style={{ fontSize: '12px' }}>View detailed company statistics on the main panel.</p>
+                <p className="badge bg-secondary bg-opacity-10 text-secondary fw-semibold p-2 mb-0" style={{ fontSize: '10px' }}>Press 'Esc' to return to Employees</p>
             </div>
         )}
-        </div>
-
     </div>
 
-    {/* COLLAPSIBLE VOICE ASSISTANT FEEDBACK PANEL (DRAWER AT BOTTOM) */}
-    {isListening && (
-        <div className="bg-white border-top shadow-lg z-3 flex-shrink-0" style={{ maxHeight: '300px', transition: 'all 0.3s ease' }}>
-            {/* Header / Toggle Bar */}
-            <div className="px-4 py-2 bg-light d-flex justify-content-between align-items-center border-bottom cursor-pointer" onClick={() => setIsVoicePanelExpanded(!isVoicePanelExpanded)}>
-                <div className="d-flex align-items-center gap-2">
-                    <span className="rounded-circle bg-danger animate-pulse" style={{ width: '8px', height: '8px' }}></span>
-                    <span className="small fw-bold text-dark text-uppercase tracking-wider" style={{ fontSize: '11px' }}>Voice Entry Feed (Continuous Audio Sync)</span>
+    {/* Main Content Area */}
+    <div className="flex-grow-1 d-flex flex-column bg-light overflow-hidden h-100 position-relative">
+    {activeTab === 'dashboard' ? (
+        <OwnerDashboard db={db} activeConf={activeConf} />
+    ) : activeTab === 'logs' ? (
+        <div className="flex-grow-1 d-flex flex-column h-100 overflow-hidden">
+            <div className="bg-white border-bottom p-4 z-1 flex-shrink-0 shadow-sm">
+                <div className="d-flex justify-content-between align-items-start">
+                    <div>
+                        <h2 className="h4 fw-bold text-dark mb-0">Daily Log: {activeConf.label.split(' ')[0]} {logDate}, {activeConf.label.split(' ')[1]}</h2>
+                        <p className="small text-muted mb-0 fw-semibold mt-1">{DAY_NAMES[(activeConf.startOffset + logDate - 1) % 7]}</p>
+                    </div>
+                    <div className="badge bg-light text-secondary border fw-bold p-2 d-none d-md-block" style={{ fontSize: '10px' }}>Press 'Esc' to close</div>
                 </div>
-                <div className="text-secondary small fw-bold" style={{ fontSize: '11px' }}>
-                    {isVoicePanelExpanded ? "Minimize Panel ▲" : "Expand Logs & Instructions ▼"}
+                
+                {(() => {
+                    let p=0, a=0, h=0, t=0, wo=0, l=0, pMiss=0, otTotal=0;
+                    db.forEach(emp => {
+                        const val = emp[`d${logDate}`] || (emp.autoWoDays?.[logDate] === "W/O" ? "W/O" : "");
+                        const aVal = String(val).trim().toUpperCase();
+                        const isE = String(emp.type || "").trim().toUpperCase() === "E";
+                        const isSunday = activeConf.weekends.includes(logDate);
+                        let getsExtraWo = false;
+                        if (isE && isSunday && aVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(aVal)) getsExtraWo = true;
+
+                        if (aVal === 'P') p++;
+                        else if (aVal === 'P?') { p++; pMiss++; } 
+                        else if (aVal === 'A') a++;
+                        else if (aVal === 'H' || aVal === '0.5') h++;
+                        else if (aVal === 'T') t++;
+                        else if (aVal === 'W/O') wo++;
+                        else if (aVal === 'L') l++;
+
+                        if (getsExtraWo) wo++;
+                        const ot = parseFloat(emp[`ot${logDate}`]);
+                        if(!isNaN(ot)) otTotal += ot;
+                    });
+
+                    return (
+                        <div className="row g-2 mt-4 border-top pt-4">
+                            <div className="col-6 col-md-4 col-lg-2">
+                                <div className="p-3 bg-success bg-opacity-10 rounded border border-success border-opacity-10">
+                                    <div className="fw-bold text-success text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Present</div>
+                                    <div className="h4 fw-bold text-success mb-0">{p}</div>
+                                </div>
+                            </div>
+                            <div className="col-6 col-md-4 col-lg-2">
+                                <div className="p-3 bg-status-l bg-opacity-10 rounded border border-indigo border-opacity-10">
+                                    <div className="fw-bold text-indigo text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Paid Leaves</div>
+                                    <div className="h4 fw-bold text-indigo mb-0">{l}</div>
+                                </div>
+                            </div>
+                            <div className="col-6 col-md-4 col-lg-2">
+                                <div className="p-3 bg-warning bg-opacity-10 rounded border border-warning border-opacity-10">
+                                    <div className="fw-bold text-warning-emphasis text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Half Day</div>
+                                    <div className="h4 fw-bold text-warning mb-0">{h}</div>
+                                </div>
+                            </div>
+                            <div className="col-6 col-md-4 col-lg-2">
+                                <div className="p-3 bg-danger bg-opacity-10 rounded border border-danger border-opacity-10">
+                                    <div className="fw-bold text-danger text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Absent</div>
+                                    <div className="h4 fw-bold text-danger mb-0">{a}</div>
+                                </div>
+                            </div>
+                            <div className="col-6 col-md-4 col-lg-2">
+                                <div className="p-3 bg-info bg-opacity-10 rounded border border-info border-opacity-10">
+                                    <div className="fw-bold text-info-emphasis text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Tour</div>
+                                    <div className="h4 fw-bold text-info mb-0">{t}</div>
+                                </div>
+                            </div>
+                            <div className="col-6 col-md-4 col-lg-1">
+                                <div className="p-3 bg-primary bg-opacity-10 rounded border border-primary border-opacity-10">
+                                    <div className="fw-bold text-primary text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>W/O</div>
+                                    <div className="h4 fw-bold text-primary mb-0">{wo}</div>
+                                </div>
+                            </div>
+                            <div className="col-6 col-md-4 col-lg-1">
+                                <div className="p-3 bg-brand-50 rounded border border-brand-100">
+                                    <div className="fw-bold text-brand-600 text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>OT (Hrs)</div>
+                                    <div className="h4 fw-bold text-brand-600 mb-0">{otTotal}</div>
+                                </div>
+                            </div>
+                        </div>
+                    );
+                })()}
+            </div>
+
+            <div className="flex-grow-1 overflow-auto p-4 bg-light">
+                <div className="card border shadow-sm rounded-3 overflow-hidden bg-white">
+                    <div className="table-responsive">
+                        <table className="table table-hover align-middle mb-0">
+                            <thead className="table-light text-secondary text-uppercase" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>
+                                <tr>
+                                    <th className="p-3 fw-bold">Employee Details</th>
+                                    <th className="p-3 fw-bold">Code</th>
+                                    <th className="p-3 fw-bold">Attendance Status</th>
+                                    <th className="p-3 fw-bold">In / Out Time</th>
+                                    <th className="p-3 fw-bold">Overtime (OT)</th>
+                                </tr>
+                            </thead>
+                            <tbody className="text-dark" style={{ fontSize: '13px' }}>
+                                {db.map(emp => {
+                                    const manualVal = emp[`d${logDate}`];
+                                    const autoWoVal = !manualVal && emp.autoWoDays?.[logDate] === "W/O" ? "W/O" : "";
+                                    const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
+                                    const otVal = emp[`ot${logDate}`];
+                                    return (
+                                        <tr key={emp.id}>
+                                            <td className="p-3 fw-bold text-dark">{emp.name}</td>
+                                            <td className="p-3 fw-bold text-secondary">{emp.code}</td>
+                                            <td className="p-3">
+                                                <span className={`badge ${aVal ? getAttColor(aVal).replace('bg-status-p', 'bg-success').replace('bg-status-a', 'bg-danger').replace('bg-status-l', 'bg-status-l text-white').replace('bg-status-h', 'bg-warning text-dark').replace('bg-slate-100', 'bg-secondary bg-opacity-10 text-secondary').replace('text-white', '') : 'bg-secondary bg-opacity-10 text-secondary'}`} style={{ fontSize: '10px', padding: '6px 10px' }}>
+                                                    {aVal || 'UNMARKED'}
+                                                </span>
+                                            </td>
+                                            <td className="p-3 fw-bold text-secondary" style={{ fontSize: '11px' }}>
+                                                {emp[`in${logDate}`] && <div className="text-success">IN: {emp[`in${logDate}`]}</div>}
+                                                {emp[`out${logDate}`] && <div className="text-danger">OUT: {emp[`out${logDate}`]}</div>}
+                                                {!emp[`in${logDate}`] && !emp[`out${logDate}`] && '-'}
+                                            </td>
+                                            <td className="p-3">
+                                                {otVal ? <span className={`badge border ${parseFloat(otVal) < 0 ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-10' : 'bg-brand-100 text-brand-700 border-brand-200'}`} style={{ fontSize: '10px' }}>{otVal} Hrs</span> : '-'}
+                                            </td>
+                                        </tr>
+                                    )
+                                })}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    ) : !activeEmp ? (
+        <div className="flex-grow-1 d-flex flex-column align-items-center justify-content-center text-secondary">
+            <div className="rounded-4 bg-secondary bg-opacity-10 d-flex align-items-center justify-content-center mb-4" style={{ width: '90px', height: '90px' }}>
+                <Icon path="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" style={{ width: '48px', height: '48px', color: '#6c757d' }} />
+            </div>
+            <h2 className="h4 fw-bold text-secondary mb-2">Select an Employee</h2>
+            <p className="small text-muted text-center mb-0" style={{ maxWidth: '280px' }}>Use the sidebar to choose an employee, or start typing to search.</p>
+        </div>
+    ) : (
+        <div className="flex-grow-1 d-flex flex-column h-100 overflow-hidden">
+            <div className="bg-white border-bottom p-4 z-1 flex-shrink-0 shadow-sm">
+                <div className="d-flex justify-content-between align-items-start">
+                    <div className="d-flex align-items-center gap-3">
+                        <div className="rounded text-white d-flex align-items-center justify-content-center text-uppercase fw-bold" style={{ width: '60px', height: '60px', fontSize: '24px', background: 'linear-gradient(135deg, var(--brand-500), var(--brand-700))' }}>{activeEmp.name.charAt(0)}</div>
+                        <div>
+                            <input type="text" value={activeEmp.name} onChange={e => updateActive({name: e.target.value})} className="form-control form-control-lg fw-bold border-0 p-0 mb-1 text-dark" style={{ fontSize: '24px', outline: 'none', background: 'transparent', boxShadow: 'none' }} />
+                            <div className="d-flex flex-wrap align-items-center gap-1">
+                                <input type="text" value={activeEmp.code} onChange={e => updateActive({code: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '90px', fontSize: '11px' }} />
+                                <input type="text" value={activeEmp.dept} onChange={e => updateActive({dept: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '120px', fontSize: '11px' }} />
+                                <input type="text" value={activeEmp.type} onChange={e => updateActive({type: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '50px', fontSize: '11px' }} placeholder="Type" />
+                                <input type="date" value={activeEmp.joiningDate || ""} onChange={e => updateActive({joiningDate: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '130px', fontSize: '11px' }} title="Joining Date" />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="mt-4 d-flex flex-wrap gap-4 border-top pt-3">
+                    <div className="d-flex flex-column"><span className="small text-muted text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Working/Paid Days</span><span className="h5 fw-bold text-dark mb-0">{activeEmp.workingDays}</span></div>
+                    <div className="d-flex flex-column"><span className="small text-success text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Present (P)</span><span className="h5 fw-bold text-success mb-0">{activeEmp.pOnly}</span></div>
+                    <div className="d-flex flex-column"><span className="small text-brand-600 text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Paid Leave (L)</span><span className="h5 fw-bold text-brand-600 mb-0">{activeEmp.leave || 0}</span></div>
+                    <div className="d-flex flex-column"><span className="small text-warning text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Missing (P?)</span><span className="h5 fw-bold text-warning mb-0">{activeEmp.pMiss}</span></div>
+                    <div className="d-flex flex-column"><span className="small text-brand-600 text-uppercase fw-bold" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Total OT</span><span className="h5 fw-bold text-brand-600 mb-0">{activeEmp.otHrs}h</span></div>
+                </div>
+
+                {/* Normalized Metrics Row Layout via responsive row columns */}
+                <div className="row row-cols-2 row-cols-md-5 g-2 mt-3">
+                    <div className="col">
+                        <div className="p-3 bg-light rounded border h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
+                            <div className="small text-muted text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Basic Salary</div>
+                            <div className="d-flex align-items-center"><span className="text-secondary fw-bold me-1">₹</span><input type="number" value={activeEmp.basicSalary || ""} onChange={e => updateActive({basicSalary: e.target.value})} className="form-control form-control-sm fw-bold border-0 p-0 text-dark bg-transparent shadow-none" style={{ fontSize: '15px', outline: 'none' }} /></div>
+                        </div>
+                    </div>
+                    <div className="col">
+                        <div className="p-3 bg-success bg-opacity-10 rounded border border-success border-opacity-10 h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
+                            <div className="small text-success text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Earned Pay</div>
+                            <div className="d-flex align-items-center"><span className="text-success fw-bold me-1">₹</span><span className="fw-bold text-success" style={{ fontSize: '15px' }}>{activeEmp.actualMonthly.toLocaleString(undefined, {maximumFractionDigits:0})}</span></div>
+                        </div>
+                    </div>
+                    <div className="col">
+                        <div className="p-3 bg-light rounded border h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
+                            <div className="small text-muted text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Prev Balance</div>
+                            <div className="d-flex align-items-center"><span className="text-secondary fw-bold me-1">₹</span><input type="number" value={activeEmp.previousBalance || ""} onChange={e => updateActive({previousBalance: e.target.value})} className="form-control form-control-sm fw-bold border-0 p-0 text-dark bg-transparent shadow-none" style={{ fontSize: '15px', outline: 'none' }} /></div>
+                        </div>
+                    </div>
+                    <div className="col">
+                        <div className="p-3 bg-danger bg-opacity-10 rounded border border-danger border-opacity-10 h-100 d-flex flex-column justify-content-between" style={{ minHeight: '80px' }}>
+                            <div className="small text-danger text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Advance Deduct</div>
+                            <div className="d-flex align-items-center"><span className="text-danger fw-bold me-1">₹</span><input type="number" value={activeEmp.advance || ""} onChange={e => updateActive({advance: e.target.value})} className="form-control form-control-sm fw-bold border-0 p-0 text-dark bg-transparent shadow-none" style={{ fontSize: '15px', outline: 'none' }} /></div>
+                        </div>
+                    </div>
+                    <div className="col">
+                        <div className="p-3 bg-dark text-white rounded border d-flex flex-column justify-content-between shadow h-100" style={{ minHeight: '80px' }}>
+                            <div className="small text-secondary text-uppercase fw-bold mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Final Payout</div>
+                            <div className="d-flex align-items-center"><span className="text-secondary fw-bold me-1">₹</span><span className="fw-bold text-white" style={{ fontSize: '16px' }}>{activeEmp.salaryToBePaid.toLocaleString(undefined, {maximumFractionDigits:0})}</span></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
-            {/* Expanded Content Area */}
-            {isVoicePanelExpanded && (
-                <div className="row g-0 h-100" style={{ height: '180px' }}>
-                    {/* Live Hearing Transcript Column */}
-                    <div className="col-12 col-md-5 p-3 border-end d-flex flex-column justify-content-between bg-light">
-                        <div>
-                            <span className="small text-uppercase text-secondary fw-bold" style={{ fontSize: '10px' }}>Spoken Words Detected:</span>
-                            <div className="mt-2 p-3 bg-white rounded border text-dark fw-medium shadow-sm animate-pulse-subtle" style={{ fontSize: '13.5px', minHeight: '65px' }}>
-                                {interimTranscript ? (
-                                    <span className="text-brand-600 italic">"{interimTranscript}..."</span>
-                                ) : (
-                                    <span className="text-muted italic">Ready. Call out commands (e.g. "Ravi Kumar present on 13" or "Ravi Kumar in 8 30 out 6 30 on 13").</span>
-                                )}
-                            </div>
-                        </div>
-                        <div className="small text-muted mt-2" style={{ fontSize: '10.5px' }}>
-                            🔄 <strong>Continuous Entry Active:</strong> Say another command without pressing any buttons.
-                        </div>
+            {/* Calendar Day grid */}
+            <div className="flex-grow-1 overflow-auto p-4 bg-light" onClick={() => { if(!focusDay) setFocusDay(1); }}>
+                <div className="d-flex align-items-center justify-content-between mb-3">
+                    <h3 className="h6 fw-bold text-dark mb-0">{activeConf.label} Register</h3>
+                    <div className="d-flex align-items-center gap-2 bg-white px-3 py-2 rounded border shadow-sm" style={{ fontSize: '11px', fontWeight: 'bold' }}>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">P</kbd> Prs (Time)</span>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">L</kbd> Paid Leave</span>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">A</kbd> Abs</span>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">H</kbd> Half</span>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">T</kbd> Tour</span>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">O</kbd> OT</span>
+                        <span className="text-secondary"><kbd className="bg-light text-dark border">⌫</kbd> Clr</span>
                     </div>
+                </div>
 
-                    {/* Interpretation Log Feed Column */}
-                    <div className="col-12 col-md-4 p-3 border-end d-flex flex-column">
-                        <span className="small text-uppercase text-secondary fw-bold mb-2 d-block" style={{ fontSize: '10px' }}>System Actions Taken:</span>
-                        <div className="flex-grow-1 overflow-auto bg-white rounded border p-2 d-flex flex-column gap-1" style={{ maxHeight: '110px' }}>
-                            {voiceLogs.length === 0 ? (
-                                <div className="text-center text-muted small italic py-3">No voice commands processed yet.</div>
-                            ) : voiceLogs.map((log, idx) => (
-                                <div key={idx} className="p-1.5 rounded border-bottom d-flex justify-content-between align-items-center" style={{ fontSize: '11.5px' }}>
-                                    <div className="d-flex align-items-center gap-1 text-truncate">
-                                        <span className={`badge ${log.success ? 'bg-success bg-opacity-10 text-success' : 'bg-danger bg-opacity-10 text-danger'}`} style={{ fontSize: '8px' }}>
-                                            {log.success ? 'SUCCESS' : 'FAILED'}
-                                        </span>
-                                        <span className="fw-semibold text-dark text-truncate">{log.text}</span>
+                <div className="grid-7 pb-5">
+                    {DAY_NAMES.map(d => <div key={d} className="text-center small fw-bold text-secondary text-uppercase" style={{ letterSpacing: '0.5px', fontSize: '10px' }}>{d}</div>)}
+                    
+                    {Array.from({ length: activeConf.startOffset }).map((_, i) => <div key={`empty-${i}`} className="opacity-0"></div>)}
+                    {Array.from({ length: activeConf.days }, (_, i) => {
+                        const dNum = i + 1;
+                        const isWk = activeConf.weekends.includes(dNum);
+                        const manualVal = activeEmp[`d${dNum}`];
+                        const autoWoVal = !manualVal && activeEmp.autoWoDays?.[dNum] === "W/O" ? "W/O" : "";
+                        const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
+                        const isAutoWo = !manualVal && autoWoVal === "W/O";
+                        const isE = String(activeEmp.type || "").trim().toUpperCase() === "E";
+                        const getsExtraWo = isWk && isE && manualVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(String(manualVal).toUpperCase());
+                        const oVal = activeEmp[`ot${dNum}`];
+                        const cVal = activeEmp[`c${dNum}`];
+                        const inVal = activeEmp[`in${dNum}`];
+                        const outVal = activeEmp[`out${dNum}`];
+                        
+                        let customBg = "bg-white";
+                        let textClass = "text-dark";
+                        if (aVal === 'P') { customBg = "bg-success text-white border-success"; textClass="text-white"; }
+                        else if (aVal === 'P?') { customBg = "bg-warning text-dark border-warning"; textClass="text-dark"; }
+                        else if (aVal === 'A') { customBg = "bg-danger text-white border-danger"; textClass="text-white"; }
+                        else if (aVal === '0.5' || aVal === 'H') { customBg = "bg-warning text-dark border-warning"; textClass="text-dark"; }
+                        else if (aVal === 'T') { customBg = "bg-info text-white border-info"; textClass="text-white"; }
+                        else if (aVal === 'W/O') { customBg = "bg-primary text-white border-primary"; textClass="text-white"; }
+                        else if (aVal === 'L') { customBg = "bg-status-l text-white border-status-l"; textClass="text-white"; }
+                        else if (isWk) { customBg = "bg-warning bg-opacity-10 border-light"; }
+
+                        return (
+                            <div id={`day-${dNum}`} key={dNum} tabIndex={0} onClick={() => setFocusDay(dNum)} className="day-card position-relative rounded border p-2 bg-white d-flex flex-column justify-content-between" style={{
+                                height: '110px',
+                                cursor: 'pointer',
+                                transition: 'all 0.15s ease',
+                                outline: 'none',
+                                borderWidth: '2px',
+                                borderColor: focusDay === dNum ? 'var(--brand-500)' : '#dee2e6',
+                                boxShadow: focusDay === dNum ? '0 0 0 4px rgba(59, 130, 246, 0.2)' : 'none',
+                                backgroundColor: isWk && !aVal ? '#fffbeb' : '#ffffff'
+                            }}>
+                                <span className="small fw-bold text-secondary position-absolute" style={{ top: '8px', left: '10px' }}>{dNum}</span>
+                                {cVal && (
+                                    <div className="position-absolute text-primary bg-primary bg-opacity-10 p-1 rounded z-2" style={{ top: '8px', right: '10px', cursor: 'pointer' }} title={cVal} onClick={(e) => { e.stopPropagation(); setFocusDay(dNum); setCommentModal({ show: true, day: dNum, val: cVal }); }}>
+                                        <Icon path="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" style={{ width: '14px', height: '14px' }}/>
                                     </div>
-                                    <span className="text-muted flex-shrink-0 pl-2" style={{ fontSize: '9px' }}>{log.time}</span>
+                                )}
+                                
+                                <div className="flex-grow-1 d-flex flex-column align-items-center justify-content-center mt-3 gap-1">
+                                    <div className="d-flex align-items-center gap-1">
+                                        <div className={`rounded d-flex align-items-center justify-content-center fw-bold ${customBg}`} style={{
+                                            width: '32px',
+                                            height: '32px',
+                                            fontSize: '12px',
+                                            border: isAutoWo ? '2px dashed var(--brand-500)' : '1px solid transparent',
+                                            opacity: isAutoWo ? 0.7 : 1,
+                                            color: isAutoWo ? 'var(--brand-600)' : 'inherit'
+                                        }}>{aVal || '-'}</div>
+                                        {oVal && <div className={`badge border ${parseFloat(oVal) < 0 ? 'bg-danger bg-opacity-10 text-danger border-danger border-opacity-10' : 'bg-brand-100 text-brand-700 border-brand-200'}`} style={{ fontSize: '9px' }}>{oVal}h</div>}
+                                    </div>
+                                    
+                                    {(inVal || outVal) && (
+                                        <div className="fw-bold text-secondary text-center mt-1" style={{ fontSize: '9px', lineHeight: '1.2' }}>
+                                            {inVal && <div className="text-success">↑ {inVal}</div>}
+                                            {outVal && <div className="text-danger">↓ {outVal}</div>}
+                                        </div>
+                                    )}
                                 </div>
-                            ))}
-                        </div>
-                    </div>
+                                {getsExtraWo && <div className="position-absolute bottom-0 start-0 end-0 text-center pb-1"><span className="badge bg-primary bg-opacity-10 text-primary uppercase fw-bold" style={{ fontSize: '8px' }}>+ W/O</span></div>}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </div>
+    )}
+    </div>
 
-                    {/* Command Reference Tips Column */}
-                    <div className="col-12 col-md-3 p-3 bg-light overflow-auto" style={{ maxHeight: '180px' }}>
-                        <span className="small text-uppercase text-secondary fw-bold mb-2 d-block" style={{ fontSize: '10px' }}>Flexible Formats Allowed:</span>
-                        <div className="d-flex flex-column gap-1" style={{ fontSize: '9.5px' }}>
-                            <div className="p-1 bg-white border rounded"><strong>Leaves:</strong> <code className="text-success">Ravi Kumar paid leave of 13</code></div>
-                            <div className="p-1 bg-white border rounded"><strong>Clock In/Out:</strong> <code className="text-success">Ravi Kumar in 8 30 out 6 30 on 13</code></div>
-                            <div className="p-1 bg-white border rounded"><strong>Comment:</strong> <code className="text-primary">Ravi Kumar comment late log on 13</code></div>
-                            <div className="p-1 bg-white border rounded"><strong>Minus OT:</strong> <code className="text-danger">Ravi Kumar penalty 1.5 of 13</code></div>
-                            <div className="p-1 bg-white border rounded"><strong>Plus OT:</strong> <code className="text-success">Ravi Kumar ot plus 2.5 on 13</code></div>
+    {/* TIME SELECTION DIALOG BOX */}
+    {timeModal.show && (
+        <div className="modal-overlay" onClick={() => setTimeModal({...timeModal, show: false})}>
+            <div className="card shadow-lg p-4 bg-white" style={{ width: '600px', maxWidth: '95%', borderRadius: '16px' }} onClick={e => e.stopPropagation()}>
+                <button onClick={() => setTimeModal({...timeModal, show: false})} className="btn-close position-absolute top-0 end-0 m-3" aria-label="Close"></button>
+                
+                <div className="mb-4 d-flex align-items-center justify-content-between border-bottom pb-3">
+                    <div>
+                        <h3 className={`h4 fw-bold mb-0 d-flex align-items-center gap-2 ${timeModal.step === 'in' ? 'text-success' : 'text-danger'}`}>
+                            {timeModal.step === 'in' ? <Icon path="M5 10l7-7m0 0l7 7m-7-7v18" className="w-6 h-6"/> : <Icon path="M19 14l-7 7m0 0l-7-7m7 7V3" className="w-6 h-6"/>}
+                            {timeModal.step === 'in' ? 'Select Clock IN Time' : 'Select Clock OUT Time'}
+                        </h3>
+                        <p className="small text-muted mb-0 fw-bold mt-1 text-uppercase tracking-widest">{activeEmp?.name} • Day {timeModal.day}</p>
+                    </div>
+                </div>
+
+                {/* Quick Suggestions Row */}
+                <div className="mb-4">
+                    <h4 className="small fw-bold text-secondary text-uppercase mb-2" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Common {timeModal.step === 'in' ? 'IN' : 'OUT'} Times</h4>
+                    <div className="row g-2">
+                        {(timeModal.step === 'in' ? SUGGESTED_IN_TIMES : SUGGESTED_OUT_TIMES).map((timeStr, idx) => (
+                            <div key={idx} className="col-3">
+                                <button 
+                                    onClick={() => handleTimeSelect(timeStr)}
+                                    className={`btn btn-sm w-100 fw-bold py-2 border ${
+                                        timeModal.step === 'in' 
+                                        ? 'btn-success bg-opacity-10 border-success text-success' 
+                                        : 'btn-danger bg-opacity-10 border-danger text-danger'
+                                    }`}
+                                    style={{ fontSize: '12px' }}
+                                >
+                                    {timeStr}
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+
+                <h4 className="small fw-bold text-secondary text-uppercase mb-2 border-top pt-3" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>All Time Options</h4>
+                <div className="row g-2 overflow-auto mb-4 time-grid" style={{ maxHeight: '200px' }}>
+                    {(timeModal.step === 'in' ? inTimeOptions : outTimeOptions).map((timeStr, idx) => (
+                        <div key={idx} className="col-3">
+                            <button 
+                                onClick={() => handleTimeSelect(timeStr)}
+                                className={`btn btn-sm w-100 border py-2 ${
+                                    timeModal.step === 'in' 
+                                    ? 'btn-outline-success border-success' 
+                                    : 'btn-outline-danger border-danger'
+                                }`}
+                                style={{ fontSize: '10px' }}
+                            >
+                                {timeStr}
+                            </button>
+                        </div>
+                    ))}
+                </div>
+
+                <div className="row g-2 border-top pt-3 bg-light p-3 rounded align-items-end">
+                    <div className="col-8 text-start">
+                        <p className="small fw-bold text-secondary text-uppercase mb-1" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Or Enter Custom Time</p>
+                        <input 
+                            type="time" 
+                            value={timeModal.custom}
+                            onChange={(e) => setTimeModal({...timeModal, custom: e.target.value})}
+                            className="form-control form-control-sm"
+                        />
+                    </div>
+                    <div className="col-4">
+                        <button 
+                            onClick={handleTimeCustomSave} 
+                            className={`btn btn-sm w-100 fw-bold py-2 text-white ${timeModal.step === 'in' ? 'btn-success' : 'btn-danger'}`}
+                        >
+                            Save Custom
+                        </button>
+                    </div>
+                </div>
+                
+                <button onClick={() => setTimeModal({...timeModal, show: false})} className="btn btn-link btn-sm text-secondary mt-3 p-0 text-decoration-none">Skip Time Selection</button>
+            </div>
+        </div>
+    )}
+
+    {/* PDF EXPORT SETUP DIALOG BOX */}
+    {pdfModal.show && (
+        <div className="modal-overlay" onClick={() => setPdfModal({...pdfModal, show: false})}>
+            <div className="card shadow-lg p-4 bg-white" style={{ width: '450px', maxWidth: '95%', borderRadius: '16px' }} onClick={e => e.stopPropagation()}>
+                <h3 className="h5 fw-bold text-dark mb-3 d-flex align-items-center gap-2 border-bottom pb-2">
+                    <Icon path="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" className="text-danger"/> 
+                    Configure Verification Print
+                </h3>
+                
+                <div className="mb-3 bg-light border p-3 rounded">
+                    <div className="form-check text-start">
+                        <input type="checkbox" checked={pdfModal.hideBasic} onChange={e => setPdfModal({...pdfModal, hideBasic: e.target.checked})} className="form-check-input" id="hideBasicCheck" />
+                        <label className="form-check-label" htmlFor="hideBasicCheck">
+                            <div className="small fw-bold text-dark">Hide Basic Salary</div>
+                            <div className="text-secondary" style={{ fontSize: '10px' }}>Omit base pay column from the PDF print</div>
+                        </label>
+                    </div>
+                </div>
+
+                <div className="mb-4">
+                    <h4 className="small fw-bold text-secondary text-uppercase mb-3 d-flex align-items-center gap-2 text-start" style={{ fontSize: '10px', letterSpacing: '0.5px' }}><Icon path="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" className="w-3.5 h-3.5"/> Signature Authorities</h4>
+                    <div className="row g-2 text-start">
+                        <div className="col-6">
+                            <label className="form-label small text-secondary mb-1" style={{ fontSize: '10px' }}>Prepared By</label>
+                            <input type="text" value={pdfSigs.prep} onChange={e => setPdfSigs({...pdfSigs, prep: e.target.value.toUpperCase()})} className="form-control form-control-sm text-uppercase fw-bold text-dark"/>
+                        </div>
+                        <div className="col-6">
+                            <label className="form-label small text-secondary mb-1" style={{ fontSize: '10px' }}>Rechecked By</label>
+                            <input type="text" value={pdfSigs.rech} onChange={e => setPdfSigs({...pdfSigs, rech: e.target.value.toUpperCase()})} className="form-control form-control-sm text-uppercase fw-bold text-dark"/>
+                        </div>
+                        <div className="col-6">
+                            <label className="form-label small text-secondary mb-1" style={{ fontSize: '10px' }}>Verified By</label>
+                            <input type="text" value={pdfSigs.ver} onChange={e => setPdfSigs({...pdfSigs, ver: e.target.value.toUpperCase()})} className="form-control form-control-sm text-uppercase fw-bold text-dark"/>
+                        </div>
+                        <div className="col-6">
+                            <label className="form-label small text-secondary mb-1" style={{ fontSize: '10px' }}>Final Approval</label>
+                            <input type="text" value={pdfSigs.app} onChange={e => setPdfSigs({...pdfSigs, app: e.target.value.toUpperCase()})} className="form-control form-control-sm text-uppercase fw-bold text-dark"/>
                         </div>
                     </div>
                 </div>
-            )}
+
+                <div className="d-flex gap-2 justify-content-end pt-2">
+                    <button onClick={() => setPdfModal({...pdfModal, show:false})} className="btn btn-sm btn-light border fw-bold text-secondary px-3">Cancel</button>
+                    <button onClick={executePDFExport} className="btn btn-sm btn-danger fw-bold text-white px-3 d-flex align-items-center gap-2">
+                        <Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" className="w-4 h-4"/> Generate PDF
+                    </button>
+                </div>
+            </div>
         </div>
     )}
 
