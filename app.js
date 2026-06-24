@@ -4,11 +4,36 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 const PWD_KEY = 'arise_sys_pwd';
 const SIG_KEY = 'arise_pdf_signatures'; 
 const MONTH_KEY = 'arise_active_month_v6';
+const SETTINGS_KEY = 'arise_sys_settings_v2';
 
 // Persistent Local Workspace DB Config
 const IDB_DB_NAME = "arise_directory_db_v1";
 const IDB_STORE_NAME = "handles";
 const IDB_KEY = "folder_sync_handle";
+
+// Default Dynamic Settings for OT & Penalties
+const DEFAULT_SETTINGS = {
+    E: {
+        inTime: '09:00', outTime: '17:30',
+        enableOT: true, otGrace: 15, otSlabMins: 30, otSlabVal: 0.5,
+        enablePenalty: true, penGrace: 10, penSlabMins: 30, penSlabVal: 0.5,
+        extraWoOnSunday: true
+    },
+    S: {
+        inTime: '09:30', outTime: '18:00',
+        enableOT: false, otGrace: 30, otSlabMins: 60, otSlabVal: 1.0,
+        enablePenalty: true, penGrace: 15, penSlabMins: 60, penSlabVal: 0.5,
+        extraWoOnSunday: false
+    }
+};
+
+const getStoredSettings = () => {
+    const saved = localStorage.getItem(SETTINGS_KEY);
+    if (saved) {
+        try { return JSON.parse(saved); } catch(e){}
+    }
+    return DEFAULT_SETTINGS;
+};
 
 // IndexedDB Helper utilities to persist directory handles across page refreshes securely
 const saveHandleToIDB = async (handle) => {
@@ -84,9 +109,8 @@ const generateTimeOptions = (startHr, startMin, endHr, endMin) => {
     return times;
 };
 
-// Broadened time options to cover the new early/late OT rules
-const inTimeOptions = generateTimeOptions(7, 30, 11, 0); // 7:30 AM to 11:00 AM
-const outTimeOptions = generateTimeOptions(15, 30, 21, 0); // 3:30 PM to 9:00 PM
+const inTimeOptions = generateTimeOptions(7, 30, 11, 0); 
+const outTimeOptions = generateTimeOptions(15, 30, 21, 0); 
 
 const SUGGESTED_IN_TIMES = ['8:00 AM', '9:00 AM', '9:30 AM', '10:00 AM'];
 const SUGGESTED_OUT_TIMES = ['5:30 PM', '6:00 PM', '6:30 PM', '7:00 PM'];
@@ -100,50 +124,65 @@ const formatTimeInput = (time24) => {
     return `${h}:${m} ${ampm}`;
 };
 
-// --- AUTO OT & PENALTY CALCULATION SYSTEM ---
+// --- DYNAMIC AUTO OT & PENALTY CALCULATION SYSTEM ---
 const parseTimeMins = (timeStr) => {
     if (!timeStr) return null;
     const [time, modifier] = timeStr.split(' ');
-    if (!time || !modifier) return null;
+    if (!time || !modifier) {
+        // Fallback if strictly 24 hour format (like from settings input)
+        if(timeStr.includes(':') && !modifier) {
+            let [hours, minutes] = timeStr.split(':').map(Number);
+            return hours * 60 + minutes;
+        }
+        return null;
+    }
     let [hours, minutes] = time.split(':').map(Number);
     if (hours === 12) hours = 0;
     if (modifier.toUpperCase() === 'PM') hours += 12;
     return hours * 60 + minutes;
 };
 
-const calculateAutoOT = (inStr, outStr) => {
+const calculateDynamicOT = (inStr, outStr, rule) => {
+    if (!rule) return 0;
+    let ot = 0;
     const inMins = parseTimeMins(inStr);
     const outMins = parseTimeMins(outStr);
-    let ot = 0;
+    const sIn = parseTimeMins(rule.inTime) || 540;   // fallback 9:00 AM
+    const sOut = parseTimeMins(rule.outTime) || 1050; // fallback 5:30 PM
 
-    // IN TIME Rules (Shift 9:00 AM)
     if (inMins !== null) {
-        if (inMins >= 470 && inMins <= 504) ot += 1.0;       // 07:50 - 08:24 (+1 hr)
-        else if (inMins >= 505 && inMins <= 520) ot += 0.5;  // 08:25 - 08:40 (+0.5 hr)
-        else if (inMins >= 551 && inMins <= 584) ot -= 0.5;  // 09:11 - 09:44 (-0.5 hr Penalty)
-        else if (inMins >= 585 && inMins <= 610) ot -= 1.0;  // 09:45 - 10:10 (-1 hr Penalty)
+        const earlyBy = sIn - inMins;
+        const lateBy = inMins - sIn;
+
+        if (rule.enableOT && earlyBy > rule.otGrace) {
+            ot += Math.floor(earlyBy / rule.otSlabMins) * rule.otSlabVal;
+        }
+        if (rule.enablePenalty && lateBy > rule.penGrace) {
+            ot -= Math.ceil(lateBy / rule.penSlabMins) * rule.penSlabVal;
+        }
     }
 
-    // OUT TIME Rules (Shift 5:30 PM)
     if (outMins !== null) {
-        if (outMins >= 955 && outMins <= 975) ot -= 1.5;       // 15:55 - 16:15 (-1.5 hr Penalty)
-        else if (outMins >= 976 && outMins <= 1004) ot -= 1.0; // 16:16 - 16:44 (-1 hr Penalty)
-        else if (outMins >= 1005 && outMins <= 1040) ot -= 0.5;// 16:45 - 17:20 (-0.5 hr Penalty)
-        else if (outMins >= 1065 && outMins <= 1094) ot += 0.5;// 17:45 - 18:14 (+0.5 hr OT)
-        else if (outMins >= 1095 && outMins <= 1125) ot += 1.0;// 18:15 - 18:45 (+1 hr OT)
-        else if (outMins >= 1126 && outMins <= 1155) ot += 1.5;// 18:46 - 19:15 (+1.5 hr OT)
-        else if (outMins >= 1156 && outMins <= 1185) ot += 2.0;// 19:16 - 19:45 (+2 hr OT)
-    }
+        const earlyGo = sOut - outMins;
+        const lateStay = outMins - sOut;
 
+        if (rule.enablePenalty && earlyGo > rule.penGrace) {
+            ot -= Math.ceil(earlyGo / rule.penSlabMins) * rule.penSlabVal;
+        }
+        if (rule.enableOT && lateStay > rule.otGrace) {
+            ot += Math.floor(lateStay / rule.otSlabMins) * rule.otSlabVal;
+        }
+    }
     return ot;
 };
 // ---------------------------------------------
 
-// Dynamic Computation based on selected Month Configuration
-const compute = (emp, monthConf) => {
+// Dynamic Computation based on selected Month Configuration & Active Settings
+const compute = (emp, monthConf, sysSettings) => {
     let pr = 0, pOnly = 0, ab = 0, ot = 0, t = 0, wo = 0, h = 0, pMiss = 0, leave = 0;
     let autoWoDays = {};
-    const isE = String(emp.type || "").trim().toUpperCase() === "E";
+    const empType = String(emp.type || "").trim().toUpperCase() || "E";
+    const rule = sysSettings[empType] || sysSettings['E'] || sysSettings['S']; 
     const { days, weekends } = monthConf;
 
     // Create a working copy of the employee to apply automatic retro-calculations safely
@@ -162,15 +201,13 @@ const compute = (emp, monthConf) => {
     }
 
     for (let i = 1; i <= days; i++) {
-        // Evaluate Auto OT/Fines Retroactively for 'E' workers 
-        // Only if it hasn't been manually overridden by the user
-        if (isE) {
-            const inTime = computedEmp[`in${i}`];
-            const outTime = computedEmp[`out${i}`];
-            if ((inTime || outTime) && !computedEmp[`otOverride${i}`]) {
-                const autoOt = calculateAutoOT(inTime, outTime);
-                computedEmp[`ot${i}`] = autoOt === 0 ? "" : autoOt.toString();
-            }
+        const inTime = computedEmp[`in${i}`];
+        const outTime = computedEmp[`out${i}`];
+        
+        // Evaluate Dynamic Auto OT/Fines Retroactively based on Settings
+        if ((inTime || outTime) && !computedEmp[`otOverride${i}`]) {
+            const autoOt = calculateDynamicOT(inTime, outTime, rule);
+            computedEmp[`ot${i}`] = autoOt === 0 ? "" : autoOt.toString();
         }
 
         const manual = String(computedEmp[`d${i}`] || "").trim().toUpperCase();
@@ -179,12 +216,15 @@ const compute = (emp, monthConf) => {
         const o = String(computedEmp[`ot${i}`] || "").trim();
 
         let getsExtraWo = false;
-        if (isE && isSunday && manual && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(manual)) getsExtraWo = true;
+        // Dynamically assign extra Sunday WO based on settings mapping
+        if (rule && rule.extraWoOnSunday && isSunday && manual && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(manual)) {
+            getsExtraWo = true;
+        }
 
         if (a === "P") { pr += 1; pOnly += 1; }
         else if (a === "P?") { pr += 1; pOnly += 1; pMiss += 1; } 
         else if (a === "T") { pr += 1; t += 1; }
-        else if (a === "L") { pr += 1; leave += 1; } // Paid Leave counts as Present/Paid Day
+        else if (a === "L") { pr += 1; leave += 1; } 
         else if (a === "W/O") { pr += 1; wo += 1; }
         else if (a === "0.5" || a === "H") { pr += 0.5; h += 1; }
         else if (a === "A") ab += 1;
@@ -214,10 +254,10 @@ const compute = (emp, monthConf) => {
     };
 };
 
-const defaultEmp = (monthConf) => {
+const defaultEmp = (monthConf, sysSettings) => {
     const e = { id: Date.now().toString(), name: "New Employee", dept: "PRODUCTION", code: `EMP-${Math.floor(Math.random()*1000)}`, type: "E", basicSalary: 0, previousBalance: 0, advance: 0, joiningDate: "" };
     for (let i = 1; i <= monthConf.days; i++) { e[`d${i}`] = ""; e[`ot${i}`] = ""; e[`c${i}`] = ""; e[`in${i}`] = ""; e[`out${i}`] = ""; }
-    return compute(e, monthConf);
+    return compute(e, monthConf, sysSettings);
 };
 
 const Icon = ({ path, className="w-5 h-5" }) => (
@@ -285,7 +325,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
             </div>
 
             <div className="row row-cols-1 row-cols-md-2 row-cols-lg-4 g-3">
-                {/* Net Payout Card */}
                 <div className="col">
                     <div className="card h-100 bg-white p-4 shadow-sm border-0 border-start border-primary border-4 rounded d-flex flex-column justify-content-between">
                         <div className="d-flex justify-content-between align-items-start mb-3">
@@ -301,7 +340,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
                     </div>
                 </div>
 
-                {/* Advance Card */}
                 <div className="col">
                     <div className="card h-100 bg-white p-4 shadow-sm border-0 border-start border-danger border-4 rounded d-flex flex-column justify-content-between">
                         <div className="d-flex justify-content-between align-items-start mb-3">
@@ -317,7 +355,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
                     </div>
                 </div>
 
-                {/* OT Cost Card */}
                 <div className="col">
                     <div className="card h-100 bg-white p-4 shadow-sm border-0 border-start border-warning border-4 rounded d-flex flex-column justify-content-between">
                         <div className="d-flex justify-content-between align-items-start mb-3">
@@ -333,7 +370,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
                     </div>
                 </div>
 
-                {/* Attendance Card */}
                 <div className="col">
                     <div className="card h-100 bg-white p-4 shadow-sm border-0 border-start border-success border-4 rounded d-flex flex-column justify-content-between">
                         <div className="d-flex justify-content-between align-items-start mb-3">
@@ -385,7 +421,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
             </div>
 
             <div className="row g-3">
-                {/* Department Costs */}
                 <div className="col-12 col-lg-4">
                     <div className="card h-100 p-4 border shadow-sm bg-white rounded-3 d-flex flex-column">
                         <h3 className="small fw-bold text-uppercase text-secondary tracking-widest mb-4">Department Costs</h3>
@@ -409,7 +444,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
                     </div>
                 </div>
 
-                {/* Top Absentees */}
                 <div className="col-12 col-lg-4">
                     <div className="card h-100 p-4 border shadow-sm bg-white rounded-3 d-flex flex-column">
                         <div className="d-flex justify-content-between align-items-center mb-4">
@@ -436,7 +470,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
                     </div>
                 </div>
 
-                {/* Highest OT Logged */}
                 <div className="col-12 col-lg-4">
                     <div className="card h-100 p-4 border shadow-sm bg-white rounded-3 d-flex flex-column">
                         <div className="d-flex justify-content-between align-items-center mb-4">
@@ -464,7 +497,6 @@ const OwnerDashboard = ({ db, activeConf }) => {
                 </div>
             </div>
 
-            {/* NEW JOINERS SECTION */}
             <div className="card p-4 border shadow-sm bg-white rounded-3 mt-2">
                 <div className="d-flex align-items-center justify-content-between mb-4">
                     <h3 className="h6 fw-bold text-dark text-uppercase mb-0 d-flex align-items-center gap-2">
@@ -504,6 +536,120 @@ const OwnerDashboard = ({ db, activeConf }) => {
     );
 };
 
+// Component for defining rules by type (E vs S)
+const TypeConfigEditor = ({ typeKey, title, data, onChange }) => {
+    const handleChange = (field, value) => {
+        onChange(typeKey, { ...data, [field]: value });
+    };
+    return (
+        <div className="card p-4 mb-4 shadow-sm border rounded-3 bg-white">
+            <h5 className="fw-bold text-dark mb-4 pb-2 border-bottom d-flex align-items-center gap-2">
+                <Icon path={typeKey === 'E' ? "M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" : "M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"} className="text-brand-500" />
+                {title} Configuration (Type: {typeKey})
+            </h5>
+            
+            <div className="row g-3 mb-4">
+                <div className="col-12 col-md-6">
+                    <label className="form-label small fw-bold text-secondary text-uppercase tracking-widest" style={{fontSize:'10px'}}>Standard Shift In</label>
+                    <input type="time" value={data.inTime} onChange={e => handleChange('inTime', e.target.value)} className="form-control fw-bold"/>
+                </div>
+                <div className="col-12 col-md-6">
+                    <label className="form-label small fw-bold text-secondary text-uppercase tracking-widest" style={{fontSize:'10px'}}>Standard Shift Out</label>
+                    <input type="time" value={data.outTime} onChange={e => handleChange('outTime', e.target.value)} className="form-control fw-bold"/>
+                </div>
+            </div>
+
+            <div className="bg-light p-3 rounded border mb-3">
+                <div className="form-check form-switch mb-3 d-flex align-items-center gap-2">
+                    <input type="checkbox" className="form-check-input mt-0" style={{width:'40px', height:'20px'}} checked={data.enableOT} onChange={e => handleChange('enableOT', e.target.checked)}/>
+                    <label className="form-check-label fw-bold text-dark ms-2">Enable Auto Overtime Generation</label>
+                </div>
+                {data.enableOT && (
+                    <div className="row g-3">
+                        <div className="col-12 col-md-4">
+                            <label className="form-label small text-secondary fw-semibold">Early/Late Grace (Mins)</label>
+                            <input type="number" value={data.otGrace} onChange={e => handleChange('otGrace', Number(e.target.value))} className="form-control form-control-sm"/>
+                        </div>
+                        <div className="col-12 col-md-4">
+                            <label className="form-label small text-secondary fw-semibold">OT Slab Threshold (Mins)</label>
+                            <input type="number" value={data.otSlabMins} onChange={e => handleChange('otSlabMins', Number(e.target.value))} className="form-control form-control-sm"/>
+                        </div>
+                        <div className="col-12 col-md-4">
+                            <label className="form-label small text-secondary fw-semibold">Earned OT Value (Hrs)</label>
+                            <input type="number" step="0.5" value={data.otSlabVal} onChange={e => handleChange('otSlabVal', Number(e.target.value))} className="form-control form-control-sm"/>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <div className="bg-light p-3 rounded border mb-3">
+                <div className="form-check form-switch mb-3 d-flex align-items-center gap-2">
+                    <input type="checkbox" className="form-check-input mt-0" style={{width:'40px', height:'20px'}} checked={data.enablePenalty} onChange={e => handleChange('enablePenalty', e.target.checked)}/>
+                    <label className="form-check-label fw-bold text-dark ms-2">Enable Auto Late/Early Penalty</label>
+                </div>
+                {data.enablePenalty && (
+                    <div className="row g-3">
+                        <div className="col-12 col-md-4">
+                            <label className="form-label small text-secondary fw-semibold">Late/Early Grace (Mins)</label>
+                            <input type="number" value={data.penGrace} onChange={e => handleChange('penGrace', Number(e.target.value))} className="form-control form-control-sm"/>
+                        </div>
+                        <div className="col-12 col-md-4">
+                            <label className="form-label small text-secondary fw-semibold">Penalty Slab (Mins)</label>
+                            <input type="number" value={data.penSlabMins} onChange={e => handleChange('penSlabMins', Number(e.target.value))} className="form-control form-control-sm"/>
+                        </div>
+                        <div className="col-12 col-md-4">
+                            <label className="form-label small text-secondary fw-semibold">Deducted Penalty (Hrs)</label>
+                            <input type="number" step="0.5" value={data.penSlabVal} onChange={e => handleChange('penSlabVal', Number(e.target.value))} className="form-control form-control-sm"/>
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <div className="form-check form-switch mt-2 d-flex align-items-center gap-2">
+                <input type="checkbox" className="form-check-input mt-0" checked={data.extraWoOnSunday} onChange={e => handleChange('extraWoOnSunday', e.target.checked)}/>
+                <label className="form-check-label fw-bold text-secondary small ms-2">Reward extra W/O on Weekends if Present/On Leave</label>
+            </div>
+        </div>
+    );
+};
+
+const SettingsDashboard = ({ settings, onSave, notify }) => {
+    const [localSet, setLocalSet] = useState(settings);
+
+    const handleTypeChange = (key, newData) => {
+        setLocalSet(prev => ({ ...prev, [key]: newData }));
+    };
+
+    const handleSaveClick = () => {
+        onSave(localSet);
+        notify("Settings successfully updated and applied!", "success");
+    };
+
+    return (
+        <div className="flex-grow-1 overflow-auto p-4 p-lg-5 hide-scroll bg-light d-flex flex-column gap-4">
+            <div className="d-flex justify-content-between align-items-end mb-2 border-bottom pb-3">
+                <div>
+                    <h2 className="h2 fw-bold text-dark mb-0">System Rules & Settings</h2>
+                    <p className="small text-muted mt-1 fw-semibold">Configure shift timings and automatic calculation logic for different workforce types.</p>
+                </div>
+                <button onClick={handleSaveClick} className="btn btn-primary fw-bold shadow-sm d-flex align-items-center gap-2">
+                    <Icon path="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" />
+                    Save & Apply Configuration
+                </button>
+            </div>
+
+            <div className="row g-4">
+                <div className="col-12 col-xl-6">
+                    <TypeConfigEditor typeKey="E" title="Production Employee" data={localSet.E} onChange={handleTypeChange} />
+                </div>
+                <div className="col-12 col-xl-6">
+                    <TypeConfigEditor typeKey="S" title="Office Staff" data={localSet.S} onChange={handleTypeChange} />
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const App = () => {
 const [auth, setAuth] = useState(() => {
     const savedPwd = localStorage.getItem(PWD_KEY);
@@ -518,12 +664,15 @@ const [activeMonthKey, setActiveMonthKey] = useState(() => localStorage.getItem(
 const [dirHandle, setDirHandle] = useState(null);
 const [isDirGranted, setIsDirGranted] = useState(false);
 
+const [sysSettings, setSysSettings] = useState(getStoredSettings);
+
 const [dbs, setDbs] = useState(() => {
     const loaded = {};
+    const initialSet = getStoredSettings();
     MONTHS.forEach(m => {
         const saved = localStorage.getItem(m.dbKey);
         if (saved) { 
-            try { loaded[m.id] = JSON.parse(saved).map(e => compute(e, m)); } 
+            try { loaded[m.id] = JSON.parse(saved).map(e => compute(e, m, initialSet)); } 
             catch(e){ loaded[m.id] = []; } 
         } else {
             loaded[m.id] = [];
@@ -569,6 +718,13 @@ const setDb = useCallback((newDbOrFn) => {
     });
 }, [activeMonthKey]);
 
+const updateSettings = useCallback((newSet) => {
+    setSysSettings(newSet);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(newSet));
+    // Immediately recompute all records using the new settings
+    setDb(prev => prev.map(e => compute(e, activeConf, newSet)));
+}, [activeConf, setDb]);
+
 const [activeTab, setActiveTab] = useState("employees");
 const [logDate, setLogDate] = useState(1);
 const [selectedId, setSelectedId] = useState(null);
@@ -578,6 +734,7 @@ const [otModal, setOtModal] = useState({ show: false, day: null, val: "" });
 const [commentModal, setCommentModal] = useState({ show: false, day: null, val: "" });
 const [pdfModal, setPdfModal] = useState({ show: false, hideBasic: false }); 
 const [timeModal, setTimeModal] = useState({ show: false, day: null, step: 'in', inVal: '', outVal: '', custom: '' });
+const [deleteStage, setDeleteStage] = useState(0);
 
 const [pdfSigs, setPdfSigs] = useState(() => {
     const saved = localStorage.getItem(SIG_KEY);
@@ -594,6 +751,8 @@ useEffect(() => { localStorage.setItem(SIG_KEY, JSON.stringify(pdfSigs)); }, [pd
 useEffect(() => { if (toast) { const t = setTimeout(() => setToast(null), 3000); return () => clearTimeout(t); } }, [toast]);
 useEffect(() => { if (otModal.show && otInputRef.current) { otInputRef.current.focus(); otInputRef.current.select(); } }, [otModal.show]);
 useEffect(() => { if (commentModal.show && commentInputRef.current) { commentInputRef.current.focus(); } }, [commentModal.show]);
+useEffect(() => { setDeleteStage(0); }, [selectedId]);
+useEffect(() => { if (deleteStage > 0) { const t = setTimeout(() => setDeleteStage(0), 4000); return () => clearTimeout(t); } }, [deleteStage]);
 
 useEffect(() => {
     const handleGlobalEsc = (e) => {
@@ -708,22 +867,15 @@ const handleImport = (e) => {
                     if (!row || row.length < 5) continue;
                     const n = String(row[1] || "").trim();
                     if (n && !["employee name", "department", "prepared by", "total due", "recheck by"].some(x => n.toLowerCase().includes(x))) {
-                        const em = { id: Math.random().toString(36).substr(2, 9), srNo: String(row[0]||"").trim(), name: n, dept: String(row[2]||"").trim(), code: String(row[3]||"").trim() || `C-${i}`, type: String(row[4]||"").trim(), basicSalary: parseFloat(row[67]) || 0, previousBalance: parseFloat(row[80]) || 0, advance: parseFloat(row[82]) || 0, joiningDate: "" };
+                        const em = { id: Math.random().toString(36).substr(2, 9), srNo: String(row[0]||"").trim(), name: n, dept: String(row[2]||"").trim(), code: String(row[3]||"").trim() || `C-${i}`, type: String(row[4]||"").trim() || "E", basicSalary: parseFloat(row[67]) || 0, previousBalance: parseFloat(row[80]) || 0, advance: parseFloat(row[82]) || 0, joiningDate: "" };
                         for (let d = 1; d <= activeConf.days; d++) { 
                             em[`d${d}`] = String(row[5+(d-1)*2]||"").trim(); 
-                            
-                            // If CSV manually contains an OT value, preserve it by setting an override
                             const rawOt = String(row[6+(d-1)*2]||"").trim();
                             em[`ot${d}`] = rawOt; 
-                            if(rawOt !== "") {
-                                em[`otOverride${d}`] = true;
-                            }
-                            
-                            em[`c${d}`] = "";
-                            em[`in${d}`] = "";
-                            em[`out${d}`] = "";
+                            if(rawOt !== "") { em[`otOverride${d}`] = true; }
+                            em[`c${d}`] = ""; em[`in${d}`] = ""; em[`out${d}`] = "";
                         }
-                        parsed.push(compute(em, activeConf));
+                        parsed.push(compute(em, activeConf, sysSettings));
                     }
                 }
                 if (parsed.length > 0) { setDb(parsed); notify(`Imported ${parsed.length} records into ${activeConf.label}`); } else notify("No valid data", "error");
@@ -815,6 +967,8 @@ const handleExportExcel = () => {
                 cell(emp.srNo || index + 1, null, true), cell(emp.name, null, true, "left"), cell(emp.dept, null, false), cell(emp.code, null, true), cell(emp.type, null, false)
             ];
 
+            const getsExtraWoSunday = sysSettings[String(emp.type).toUpperCase() || 'E']?.extraWoOnSunday ?? true;
+
             for (let i = 1; i <= activeConf.days; i++) {
                 const isWk = activeConf.weekends.includes(i);
                 const bg = isWk ? CLR_YELLOW : null;
@@ -830,12 +984,14 @@ const handleExportExcel = () => {
             }
 
             const attRange = `F${R}:${endAttColName}${R}`;
-            const extraWoFormula = sunCols.length ? sunCols.map(col => `IF(OR(${col}${R}="P", ${col}${R}="P?", ${col}${R}="H", ${col}${R}="0.5", ${col}${R}="T", ${col}${R}="L"), 1, 0)`).join("+") : "0";
+            
+            // Formula dynamically references whether this employee type gets extra W/O
+            const extraWoFormula = getsExtraWoSunday && sunCols.length ? sunCols.map(col => `IF(OR(${col}${R}="P", ${col}${R}="P?", ${col}${R}="H", ${col}${R}="0.5", ${col}${R}="T", ${col}${R}="L"), 1, 0)`).join("+") : "0";
 
             row.push(
                 cell(parseFloat(emp.basicSalary) || 0, null, true),
                 cell(`COUNTIF(${attRange},"P")+COUNTIF(${attRange},"P~?")+COUNTIF(${attRange},"H")*0.5+COUNTIF(${attRange},"0.5")*0.5+COUNTIF(${attRange},"L")`, null, true, "center", true),
-                cell(`COUNTIF(${attRange},"W/O") + IF(UPPER(E${R})="E", ${extraWoFormula}, 0)`, null, false, "center", true),
+                cell(`COUNTIF(${attRange},"W/O") + IF(1=1, ${extraWoFormula}, 0)`, null, false, "center", true), // Modified to always apply formula if applicable based on js evaluation
                 cell(`COUNTIF(${attRange},"T")`, null, false, "center", true),
                 cell(`${colP}${R}+${colWO}${R}+${colT}${R}`, null, true, "center", true),
                 cell(`COUNTIF(${attRange},"A")`, null, true, "center", true),
@@ -874,7 +1030,6 @@ const handleExportExcel = () => {
     } catch(err) { notify("Failed to export Excel", "error"); console.error(err); }
 };
 
-// EXPORT: Special In/Out Excel format
 const handleExportInOutExcel = () => {
     if (db.length === 0) { notify("No data to export", "error"); return; }
     try {
@@ -908,7 +1063,7 @@ const handleExportInOutExcel = () => {
             return { v: val === undefined || val === null ? "" : val, t: "s", s: style };
         };
 
-        const totalCols = 2 + activeConf.days; // Sr, Name, Days 1..N
+        const totalCols = 2 + activeConf.days;
         const merges = [];
 
         const row1 = [ { v: "ARISE CONSTRUCTION EQUIPMENT", t: "s", s: { alignment: { horizontal: "center", vertical: "center" }, font: { bold: true, sz: 16, color: CLR_WHITE }, fill: { fgColor: CLR_HEADER } } } ];
@@ -1145,23 +1300,22 @@ const executePDFExport = () => {
 
 const updateActive = (updates) => {
     if (!selectedId) return;
-    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, ...updates }, activeConf) : e));
+    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, ...updates }, activeConf, sysSettings) : e));
 };
 
 const updateAtt = useCallback((day, val) => {
     if (!selectedId) return;
-    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`d${day}`]: val }, activeConf) : e));
-}, [selectedId, activeConf, setDb]);
+    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`d${day}`]: val }, activeConf, sysSettings) : e));
+}, [selectedId, activeConf, sysSettings, setDb]);
 
-// Manual OT override
 const updateOt = (day, val) => {
-    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`ot${day}`]: val, [`otOverride${day}`]: true }, activeConf) : e));
+    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`ot${day}`]: val, [`otOverride${day}`]: true }, activeConf, sysSettings) : e));
     setOtModal({ show: false, day: null, val: "" });
     setTimeout(() => { document.getElementById(`day-${day}`)?.focus(); }, 10);
 };
 
 const updateComment = (day, val) => {
-    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`c${day}`]: val }, activeConf) : e));
+    setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, [`c${day}`]: val }, activeConf, sysSettings) : e));
     setCommentModal({ show: false, day: null, val: "" });
     setTimeout(() => { document.getElementById(`day-${day}`)?.focus(); }, 10);
 };
@@ -1172,15 +1326,13 @@ const handleTimeSelect = (timeStr) => {
     } else {
         setDb(prev => prev.map(e => {
             if (e.id === selectedId) {
-                // When we receive new punch times, we clear the manual OT override
-                // so the automatic OT engine takes over again.
                 let updatedEmp = { 
                     ...e, 
                     [`in${timeModal.day}`]: timeModal.inVal, 
                     [`out${timeModal.day}`]: timeStr,
                     [`otOverride${timeModal.day}`]: false 
                 };
-                return compute(updatedEmp, activeConf);
+                return compute(updatedEmp, activeConf, sysSettings);
             }
             return e;
         }));
@@ -1211,11 +1363,26 @@ const handleMigrateEmployees = () => {
             for(let i=1; i<=31; i++) { delete newE[`d${i}`]; delete newE[`ot${i}`]; delete newE[`c${i}`]; delete newE[`in${i}`]; delete newE[`out${i}`]; delete newE[`otOverride${i}`]; }
             for(let i=1; i<=activeConf.days; i++) { newE[`d${i}`] = ""; newE[`ot${i}`] = ""; newE[`c${i}`] = ""; newE[`in${i}`] = ""; newE[`out${i}`] = ""; newE[`otOverride${i}`] = false; }
             newE.previousBalance = 0; newE.advance = 0;
-            return compute(newE, activeConf);
+            return compute(newE, activeConf, sysSettings);
         });
         setDb(copied); notify("Workforce migrated successfully!", "success");
     }
 };
+
+// 3-Stage Delete Confirmation Logic
+const executeDeleteEmployee = () => {
+    if (deleteStage < 3) {
+        setDeleteStage(prev => prev + 1);
+    } else {
+        setDb(prev => prev.filter(e => e.id !== selectedId));
+        setSelectedId(null);
+        setDeleteStage(0);
+        notify("Employee removed from active month.", "success");
+    }
+};
+
+const delTexts = ["Delete Employee", "Are you sure?", "Confirm Delete?", "Final Delete!"];
+const delColors = ["btn-outline-danger", "btn-warning", "btn-danger text-white", "btn-dark text-white"];
 
 useEffect(() => {
     const handleGlobalKey = (e) => {
@@ -1253,7 +1420,7 @@ useEffect(() => {
             if (key === 't') val = 'T';
             if (key === 'w') val = 'W/O';
             if (key === 'l') val = 'L';
-            setDb(prev => prev.map(em => em.id === selectedId ? compute({ ...em, [`d${focusDay}`]: val, [`in${focusDay}`]: '', [`out${focusDay}`]: '' }, activeConf) : em));
+            setDb(prev => prev.map(em => em.id === selectedId ? compute({ ...em, [`d${focusDay}`]: val, [`in${focusDay}`]: '', [`out${focusDay}`]: '' }, activeConf, sysSettings) : em));
             setFocusDay(prev => Math.min(activeConf.days, prev + 1)); 
             e.preventDefault();
         }
@@ -1278,7 +1445,7 @@ useEffect(() => {
     };
     window.addEventListener('keydown', handleGlobalKey);
     return () => window.removeEventListener('keydown', handleGlobalKey);
-}, [selectedId, focusDay, db, otModal.show, commentModal.show, pdfModal.show, timeModal.show, updateAtt, activeTab, activeConf.days]);
+}, [selectedId, focusDay, db, otModal.show, commentModal.show, pdfModal.show, timeModal.show, updateAtt, activeTab, activeConf.days, sysSettings]);
 
 useEffect(() => { if (focusDay && activeTab === 'employees') document.getElementById(`day-${focusDay}`)?.focus(); }, [focusDay, activeTab]);
 
@@ -1355,7 +1522,7 @@ return (
                     <button onClick={() => fileRef.current.click()} className="btn btn-sm btn-light border flex-grow-1 fw-bold text-secondary d-flex align-items-center justify-content-center gap-1 shadow-sm" style={{ fontSize: '10px' }}>
                         <Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/> Import
                     </button>
-                    <button onClick={() => { const e = defaultEmp(activeConf); setDb([e, ...db]); setActiveTab('employees'); setSelectedId(e.id); }} className="btn btn-sm btn-primary px-3 d-flex align-items-center justify-content-center shadow-sm" title="Add New">
+                    <button onClick={() => { const e = defaultEmp(activeConf, sysSettings); setDb([e, ...db]); setActiveTab('employees'); setSelectedId(e.id); }} className="btn btn-sm btn-primary px-3 d-flex align-items-center justify-content-center shadow-sm" title="Add New">
                         <Icon path="M12 4v16m8-8H4"/>
                     </button>
                 </div>
@@ -1392,10 +1559,11 @@ return (
                 </div>
             </div>
 
-            <div className="d-flex bg-secondary bg-opacity-10 p-1 rounded mt-1 gap-1">
-                <button onClick={() => setActiveTab('employees')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'employees' ? '#ffffff' : 'transparent', color: activeTab === 'employees' ? '#212529' : '#6c757d', boxShadow: activeTab === 'employees' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Employees</button>
-                <button onClick={() => setActiveTab('logs')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'logs' ? '#ffffff' : 'transparent', color: activeTab === 'logs' ? '#212529' : '#6c757d', boxShadow: activeTab === 'logs' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Daily Logs</button>
-                <button onClick={() => setActiveTab('dashboard')} className={`btn btn-sm flex-grow-1 fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'dashboard' ? '#ffffff' : 'transparent', color: activeTab === 'dashboard' ? '#212529' : '#6c757d', boxShadow: activeTab === 'dashboard' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Analytics</button>
+            <div className="row g-1 bg-secondary bg-opacity-10 p-1 rounded mt-1 mx-0">
+                <div className="col-6"><button onClick={() => setActiveTab('employees')} className={`btn w-100 btn-sm fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'employees' ? '#ffffff' : 'transparent', color: activeTab === 'employees' ? '#212529' : '#6c757d', boxShadow: activeTab === 'employees' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Employees</button></div>
+                <div className="col-6"><button onClick={() => setActiveTab('logs')} className={`btn w-100 btn-sm fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'logs' ? '#ffffff' : 'transparent', color: activeTab === 'logs' ? '#212529' : '#6c757d', boxShadow: activeTab === 'logs' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Daily Logs</button></div>
+                <div className="col-6"><button onClick={() => setActiveTab('dashboard')} className={`btn w-100 btn-sm fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'dashboard' ? '#ffffff' : 'transparent', color: activeTab === 'dashboard' ? '#212529' : '#6c757d', boxShadow: activeTab === 'dashboard' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Analytics</button></div>
+                <div className="col-6"><button onClick={() => setActiveTab('settings')} className={`btn w-100 btn-sm fw-bold py-1`} style={{ fontSize: '10px', backgroundColor: activeTab === 'settings' ? '#ffffff' : 'transparent', color: activeTab === 'settings' ? '#212529' : '#6c757d', boxShadow: activeTab === 'settings' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none' }}>Settings</button></div>
             </div>
         </div>
         
@@ -1466,9 +1634,11 @@ return (
             </>
         ) : (
             <div className="flex-grow-1 bg-light d-flex flex-column p-4 align-items-center justify-content-center text-center">
-                <div className="rounded bg-brand-50 d-flex align-items-center justify-content-center mb-3 shadow-inner" style={{ width: '70px', height: '70px' }}><Icon path="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" className="text-brand-600" style={{ width: '36px', height: '36px' }} /></div>
-                <h2 className="h5 fw-bold text-dark mb-2">Analytics Active</h2>
-                <p className="small text-muted mb-3" style={{ fontSize: '12px' }}>View detailed company statistics on the main panel.</p>
+                <div className="rounded bg-brand-50 d-flex align-items-center justify-content-center mb-3 shadow-inner" style={{ width: '70px', height: '70px' }}>
+                    <Icon path={activeTab === 'settings' ? "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" : "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"} className="text-brand-600" style={{ width: '36px', height: '36px' }} />
+                </div>
+                <h2 className="h5 fw-bold text-dark mb-2">{activeTab === 'settings' ? "Configuration Mode" : "Analytics Active"}</h2>
+                <p className="small text-muted mb-3" style={{ fontSize: '12px' }}>{activeTab === 'settings' ? "Edit workforce rules in the main panel." : "View detailed company statistics on the main panel."}</p>
                 <p className="badge bg-secondary bg-opacity-10 text-secondary fw-semibold p-2 mb-0" style={{ fontSize: '10px' }}>Press 'Esc' to return to Employees</p>
             </div>
         )}
@@ -1478,6 +1648,8 @@ return (
     <div className="flex-grow-1 d-flex flex-column bg-light overflow-hidden h-100 position-relative">
     {activeTab === 'dashboard' ? (
         <OwnerDashboard db={db} activeConf={activeConf} />
+    ) : activeTab === 'settings' ? (
+        <SettingsDashboard settings={sysSettings} onSave={updateSettings} notify={notify} />
     ) : activeTab === 'logs' ? (
         <div className="flex-grow-1 d-flex flex-column h-100 overflow-hidden">
             <div className="bg-white border-bottom p-4 z-1 flex-shrink-0 shadow-sm">
@@ -1494,10 +1666,12 @@ return (
                     db.forEach(emp => {
                         const val = emp[`d${logDate}`] || (emp.autoWoDays?.[logDate] === "W/O" ? "W/O" : "");
                         const aVal = String(val).trim().toUpperCase();
-                        const isE = String(emp.type || "").trim().toUpperCase() === "E";
+                        const empType = String(emp.type || "").trim().toUpperCase() || "E";
+                        const rule = sysSettings[empType] || sysSettings['E'];
                         const isSunday = activeConf.weekends.includes(logDate);
+                        
                         let getsExtraWo = false;
-                        if (isE && isSunday && aVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(aVal)) getsExtraWo = true;
+                        if (rule && rule.extraWoOnSunday && isSunday && aVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(aVal)) getsExtraWo = true;
 
                         if (aVal === 'P') p++;
                         else if (aVal === 'P?') { p++; pMiss++; } 
@@ -1625,11 +1799,15 @@ return (
                             <div className="d-flex flex-wrap align-items-center gap-1">
                                 <input type="text" value={activeEmp.code} onChange={e => updateActive({code: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '90px', fontSize: '11px' }} />
                                 <input type="text" value={activeEmp.dept} onChange={e => updateActive({dept: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '120px', fontSize: '11px' }} />
-                                <input type="text" value={activeEmp.type} onChange={e => updateActive({type: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '50px', fontSize: '11px' }} placeholder="Type" />
+                                <input type="text" value={activeEmp.type} onChange={e => updateActive({type: e.target.value.toUpperCase()})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '50px', fontSize: '11px' }} placeholder="Type (E/S)" />
                                 <input type="date" value={activeEmp.joiningDate || ""} onChange={e => updateActive({joiningDate: e.target.value})} className="form-control form-control-sm text-center fw-bold bg-light text-secondary border p-1" style={{ width: '130px', fontSize: '11px' }} title="Joining Date" />
                             </div>
                         </div>
                     </div>
+                    <button onClick={executeDeleteEmployee} className={`btn btn-sm fw-bold d-flex align-items-center gap-1 transition-all ${delColors[deleteStage]}`}>
+                        <Icon path="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" className="w-4 h-4"/>
+                        {delTexts[deleteStage]}
+                    </button>
                 </div>
 
                 <div className="mt-4 d-flex flex-wrap gap-4 border-top pt-3">
@@ -1701,8 +1879,11 @@ return (
                         const autoWoVal = !manualVal && activeEmp.autoWoDays?.[dNum] === "W/O" ? "W/O" : "";
                         const aVal = manualVal ? String(manualVal).toUpperCase() : autoWoVal;
                         const isAutoWo = !manualVal && autoWoVal === "W/O";
-                        const isE = String(activeEmp.type || "").trim().toUpperCase() === "E";
-                        const getsExtraWo = isWk && isE && manualVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(String(manualVal).toUpperCase());
+                        
+                        const empType = String(activeEmp.type || "").trim().toUpperCase() || "E";
+                        const rule = sysSettings[empType] || sysSettings['E'];
+                        const getsExtraWo = rule?.extraWoOnSunday && isWk && manualVal && ['P', 'P?', 'H', '0.5', 'T', 'L'].includes(String(manualVal).toUpperCase());
+                        
                         const oVal = activeEmp[`ot${dNum}`];
                         const cVal = activeEmp[`c${dNum}`];
                         const inVal = activeEmp[`in${dNum}`];
@@ -1783,7 +1964,6 @@ return (
                     </div>
                 </div>
 
-                {/* Quick Suggestions Row */}
                 <div className="mb-4">
                     <h4 className="small fw-bold text-secondary text-uppercase mb-2" style={{ fontSize: '10px', letterSpacing: '0.5px' }}>Common {timeModal.step === 'in' ? 'IN' : 'OUT'} Times</h4>
                     <div className="row g-2">
