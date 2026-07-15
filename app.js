@@ -427,7 +427,7 @@ const OwnerDashboard = ({ db, activeConf }) => {
     db.forEach(emp => {
       totalBasic += (parseFloat(emp.basicSalary) || 0);
       totalEarned += (parseFloat(emp.actualMonthly) || 0);
-      totalPayout += Math.max(0, parseFloat(emp.salaryToBePaid) || 0); 
+      totalPayout += (parseFloat(emp.salaryToBePaid) || 0); 
       totalAdvance += (parseFloat(emp.advance) || 0);
       totalOTCost += (parseFloat(emp.dailyOtSalary) || 0);
       totalOTHours += (parseFloat(emp.otHrs) || 0);
@@ -974,7 +974,8 @@ const executePDFExport = () => {
   
   try {
     const { jsPDF } = window.jspdf; const doc = new jsPDF();
-    let tBasic = 0, tDays = 0, tAdv = 0, tNet = 0, tGross = 0; let tP = 0, tL = 0, tWO = 0, tH = 0, tPMiss = 0, tT = 0, tOT = 0;
+    let tBasic = 0, tDays = 0, tAdv = 0, tNet = 0, tGross = 0, tPrev = 0; 
+    let tP = 0, tL = 0, tWO = 0, tH = 0, tPMiss = 0, tT = 0, tOT = 0;
     const deptStats = {}; const newJoiners = [];
     
     const sortedDb = [...targetDb].sort((a, b) => {
@@ -986,9 +987,10 @@ const executePDFExport = () => {
     sortedDb.forEach(e => {
       tBasic += (parseFloat(e.basicSalary) || 0); 
       tDays += (parseFloat(e.workingDays) || 0); 
+      tGross += (parseFloat(e.actualMonthly) || 0);
+      tPrev += (parseFloat(e.previousBalance) || 0);
       tAdv += (parseFloat(e.advance) || 0); 
       tNet += (parseFloat(e.salaryToBePaid) || 0); 
-      tGross += (parseFloat(e.actualMonthly) || 0);
       
       tP += (parseFloat(e.pOnly) || 0); 
       tL += (parseFloat(e.leave) || 0); 
@@ -1089,6 +1091,37 @@ const executePDFExport = () => {
       doc.autoTable({ startY: currentY + 4, head: [['S.No', 'Employee Name', 'Department', 'Joining Date', 'Basic Salary']], body: njBody, theme: 'grid', headStyles: { fillColor: [230, 240, 255], textColor: [15, 61, 129], fontStyle: 'bold', halign: 'center' }, styles: { fontSize: 8.5, halign: 'center', cellPadding: 2 }, columnStyles: { 1: { halign: 'left' }, 2: { halign: 'left' } } });
       currentY = doc.lastAutoTable.finalY + 10;
     }
+
+    if (currentY + 50 > 280) { doc.addPage(); currentY = 20; }
+    doc.setFontSize(11); doc.setTextColor(15, 61, 129); doc.setFont("helvetica", "bold"); doc.text("Financial Reconciliation & Breakdown", 14, currentY);
+    
+    const recBody = [
+      ["Total Gross Earned", `Rs. ${Math.round(tGross).toLocaleString()}`],
+      ["(+) Total Previous Balance Due", `Rs. ${Math.round(tPrev).toLocaleString()}`],
+      ["(=) Total Ledger Balance", `Rs. ${Math.round(tGross + tPrev).toLocaleString()}`],
+      ["(-) Total Advance Deductions", `Rs. ${Math.round(tAdv).toLocaleString()}`],
+      ["(=) Final Net Payable", `Rs. ${Math.round(tNet).toLocaleString()}`]
+    ];
+    
+    doc.autoTable({
+      startY: currentY + 4,
+      body: recBody,
+      theme: 'grid',
+      styles: { fontSize: 9.5, cellPadding: 3 },
+      columnStyles: { 
+        0: { fontStyle: 'bold', halign: 'left', fillColor: [248, 250, 252] }, 
+        1: { fontStyle: 'bold', halign: 'right' } 
+      },
+      didParseCell: function(data) {
+        if (data.row.index === 4) {
+          data.cell.styles.fillColor = [230, 240, 255];
+          data.cell.styles.textColor = [0, 128, 0];
+        } else if (data.row.index === 3) {
+          data.cell.styles.textColor = [180, 0, 0];
+        }
+      }
+    });
+    currentY = doc.lastAutoTable.finalY + 10;
     
     let finalY = currentY + 10; if (finalY > 270) { doc.addPage(); finalY = 30; }
     doc.setFontSize(8); doc.setTextColor(0, 0, 0); doc.setLineWidth(0.5); doc.setDrawColor(0, 0, 0);
