@@ -436,7 +436,7 @@ const OwnerDashboard = ({ db, activeConf }) => {
       totalMissingPunches += (parseFloat(emp.pMiss) || 0);
       const dept = emp.dept || "Uncategorized";
       if (!deptCosts[dept]) deptCosts[dept] = 0;
-      const pay = parseFloat(emp.actualMonthly) || 0; // tracking gross cost here now for analytics
+      const pay = parseFloat(emp.actualMonthly) || 0; 
       deptCosts[dept] += (pay > 0 ? pay : 0);
       if (emp.joiningDate && emp.joiningDate.trim() !== "") {
         newJoiners.push(emp);
@@ -647,7 +647,7 @@ const [search, setSearch] = useState("");
 const [focusDay, setFocusDay] = useState(null);
 const [otModal, setOtModal] = useState({ show: false, day: null, val: "" });
 const [commentModal, setCommentModal] = useState({ show: false, day: null, val: "" });
-const [pdfModal, setPdfModal] = useState({ show: false, hideBasic: false }); 
+const [pdfModal, setPdfModal] = useState({ show: false, hideBasic: false, firmName: "ARISE CONSTRUCTION EQUIPMENTS", selectedEmps: [] }); 
 const [timeModal, setTimeModal] = useState({ show: false, day: null, step: 'in', inVal: '', outVal: '', custom: '' });
 const [deleteStage, setDeleteStage] = useState(0);
 const [pdfSigs, setPdfSigs] = useState(() => {
@@ -964,14 +964,20 @@ const handleExportInOutExcel = () => {
 };
 const executePDFExport = () => {  
   const hideBasic = pdfModal.hideBasic;
+  const firmName = pdfModal.firmName || "ARISE CONSTRUCTION EQUIPMENTS";
+  const selectedEmps = pdfModal.selectedEmps || [];
+  
   setPdfModal({ ...pdfModal, show: false });
-  if (db.length === 0) { notify("No data to export", "error"); return; }
+  
+  const targetDb = db.filter(e => selectedEmps.includes(e.id));
+  if (targetDb.length === 0) { notify("No employees selected for export", "error"); return; }
+  
   try {
     const { jsPDF } = window.jspdf; const doc = new jsPDF();
     let tBasic = 0, tDays = 0, tAdv = 0, tNet = 0, tGross = 0; let tP = 0, tL = 0, tWO = 0, tH = 0, tPMiss = 0, tT = 0, tOT = 0;
     const deptStats = {}; const newJoiners = [];
     
-    const sortedDb = [...db].sort((a, b) => {
+    const sortedDb = [...targetDb].sort((a, b) => {
       const d1 = (a.dept || 'Uncategorized').toLowerCase();
       const d2 = (b.dept || 'Uncategorized').toLowerCase();
       return d1.localeCompare(d2);
@@ -1000,7 +1006,7 @@ const executePDFExport = () => {
       if(e.joiningDate && e.joiningDate.trim() !== "") { newJoiners.push(e); }
     });
     
-    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(15, 61, 129); doc.text("ARISE CONSTRUCTION EQUIPMENTS", 105, 15, { align: 'center' });
+    doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(15, 61, 129); doc.text(firmName.toUpperCase(), 105, 15, { align: 'center' });
     doc.setFontSize(11); doc.setTextColor(60, 60, 60); doc.text(`Payroll & Attendance Verification Dashboard - ${activeConf.label.toUpperCase()}`, 105, 22, { align: 'center' });
     doc.setFillColor(235, 235, 235);
     
@@ -1091,7 +1097,8 @@ const executePDFExport = () => {
     doc.line(106, finalY, 150, finalY); doc.text("Verified By", 128, finalY + 5, { align: 'center', fontStyle: 'bold' }); doc.text(pdfSigs.ver, 128, finalY + 9, { align: 'center' });
     doc.line(156, finalY, 196, finalY); doc.text("Final Approval", 176, finalY + 5, { align: 'center', fontStyle: 'bold' }); doc.text(pdfSigs.app, 176, finalY + 9, { align: 'center' });
     
-    doc.save(`Arise_Verification_${activeConf.short}.pdf`); notify("Verification PDF Exported successfully!", "success");
+    doc.save(`Verification_${firmName.replace(/\s+/g, '_')}_${activeConf.short}.pdf`); 
+    notify("Verification PDF Exported successfully!", "success");
   } catch (err) { notify("Failed to export PDF.", "error"); }
 };
 const updateActive = (updates) => { if (selectedId) setDb(prev => prev.map(e => e.id === selectedId ? compute({ ...e, ...updates }, activeConf, sysSettings) : e)); };
@@ -1220,7 +1227,7 @@ return (
         <div className="d-flex gap-1">
           <button onClick={handleExportInOutExcel} className="btn btn-sm btn-light border text-primary flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#eef2ff' }} title="Download Special IN/OUT Time Sheet"><Icon path="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" style={{ width: '12px', height: '12px' }}/> IN/OUT</button>
           <button onClick={handleExportExcel} className="btn btn-sm btn-light border text-success flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#ecfdf5' }} title="Detailed Attendance Sheet"><Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" style={{ width: '12px', height: '12px' }}/> Excel</button>
-          <button onClick={() => setPdfModal({ show: true, hideBasic: false })} className="btn btn-sm btn-light border text-danger flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#fff5f5' }} title="Verification Summary Print"><Icon path="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" style={{ width: '12px', height: '12px' }}/> PDF</button>
+          <button onClick={() => setPdfModal({ show: true, hideBasic: false, firmName: "ARISE CONSTRUCTION EQUIPMENTS", selectedEmps: db.map(e => e.id) })} className="btn btn-sm btn-light border text-danger flex-grow-1 fw-bold d-flex align-items-center justify-content-center gap-1" style={{ fontSize: '9px', backgroundColor: '#fff5f5' }} title="Verification Summary Print"><Icon path="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" style={{ width: '12px', height: '12px' }}/> PDF</button>
         </div>
         <div className="border-top pt-2 mt-1">
           {!dirHandle ? (
@@ -1528,9 +1535,40 @@ return (
   )}
   {pdfModal.show && (
     <div className="modal-overlay" onClick={() => setPdfModal({...pdfModal, show: false})}>
-      <div className="card shadow-lg p-4 bg-white" style={{ width: '450px', maxWidth: '95%', borderRadius: '16px' }} onClick={e => e.stopPropagation()}>
+      <div className="card shadow-lg p-4 bg-white" style={{ width: '500px', maxWidth: '95%', borderRadius: '16px' }} onClick={e => e.stopPropagation()}>
         <h3 className="h5 fw-bold text-dark mb-3 d-flex align-items-center gap-2 border-bottom pb-2"><Icon path="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" className="text-danger"/> Configure Verification Print</h3>
+        
+        <div className="mb-3">
+          <label className="form-label small text-secondary fw-bold mb-1" style={{ fontSize: '10px' }}>Firm / Company Name</label>
+          <input type="text" value={pdfModal.firmName} onChange={e => setPdfModal({...pdfModal, firmName: e.target.value})} className="form-control form-control-sm fw-bold text-dark"/>
+        </div>
+
+        <div className="mb-3">
+          <label className="form-label small text-secondary fw-bold mb-1 d-flex justify-content-between align-items-center" style={{ fontSize: '10px' }}>
+            <span>Select Employees</span>
+            <span className="text-brand-600 cursor-pointer text-decoration-underline" onClick={() => setPdfModal({...pdfModal, selectedEmps: pdfModal.selectedEmps.length === db.length ? [] : db.map(e=>e.id)})}>
+              {pdfModal.selectedEmps.length === db.length ? 'Deselect All' : 'Select All'}
+            </span>
+          </label>
+          <div className="border rounded p-2 bg-light overflow-auto" style={{maxHeight: '150px'}}>
+            {db.map(e => (
+              <div key={e.id} className="form-check mb-1">
+                <input className="form-check-input" type="checkbox" checked={pdfModal.selectedEmps.includes(e.id)} onChange={(ev) => {
+                  if(ev.target.checked) {
+                    setPdfModal({...pdfModal, selectedEmps: [...pdfModal.selectedEmps, e.id]});
+                  } else {
+                    setPdfModal({...pdfModal, selectedEmps: pdfModal.selectedEmps.filter(id => id !== e.id)});
+                  }
+                }} id={`chk-${e.id}`} />
+                <label className="form-check-label small fw-semibold text-dark" htmlFor={`chk-${e.id}`}>{e.name} <span className="text-muted" style={{fontSize: '10px'}}>({e.code})</span></label>
+              </div>
+            ))}
+            {db.length === 0 && <div className="small text-muted text-center py-2">No employees available</div>}
+          </div>
+        </div>
+
         <div className="mb-3 bg-light border p-3 rounded"><div className="form-check text-start"><input type="checkbox" checked={pdfModal.hideBasic} onChange={e => setPdfModal({...pdfModal, hideBasic: e.target.checked})} className="form-check-input" id="hideBasicCheck" /><label className="form-check-label" htmlFor="hideBasicCheck"><div className="small fw-bold text-dark">Hide Basic Salary</div><div className="text-secondary" style={{ fontSize: '10px' }}>Omit base pay column from the PDF print</div></label></div></div>
+        
         <div className="mb-4">
           <h4 className="small fw-bold text-secondary text-uppercase mb-3 d-flex align-items-center gap-2 text-start" style={{ fontSize: '10px', letterSpacing: '0.5px' }}><Icon path="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" className="w-3.5 h-3.5"/> Signature Authorities</h4>
           <div className="row g-2 text-start">
@@ -1540,7 +1578,7 @@ return (
             <div className="col-6"><label className="form-label small text-secondary mb-1" style={{ fontSize: '10px' }}>Final Approval</label><input type="text" value={pdfSigs.app} onChange={e => setPdfSigs({...pdfSigs, app: e.target.value.toUpperCase()})} className="form-control form-control-sm text-uppercase fw-bold text-dark"/></div>
           </div>
         </div>
-        <div className="d-flex gap-2 justify-content-end pt-2">
+        <div className="d-flex gap-2 justify-content-end pt-2 border-top mt-2 pt-3">
           <button onClick={() => setPdfModal({...pdfModal, show:false})} className="btn btn-sm btn-light border fw-bold text-secondary px-3">Cancel</button>
           <button onClick={executePDFExport} className="btn btn-sm btn-danger fw-bold text-white px-3 d-flex align-items-center gap-2"><Icon path="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" className="w-4 h-4"/> Generate PDF</button>
         </div>
