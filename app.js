@@ -436,7 +436,7 @@ const OwnerDashboard = ({ db, activeConf }) => {
       totalMissingPunches += (parseFloat(emp.pMiss) || 0);
       const dept = emp.dept || "Uncategorized";
       if (!deptCosts[dept]) deptCosts[dept] = 0;
-      const pay = parseFloat(emp.salaryToBePaid) || 0;
+      const pay = parseFloat(emp.actualMonthly) || 0; // tracking gross cost here now for analytics
       deptCosts[dept] += (pay > 0 ? pay : 0);
       if (emp.joiningDate && emp.joiningDate.trim() !== "") {
         newJoiners.push(emp);
@@ -523,7 +523,7 @@ const OwnerDashboard = ({ db, activeConf }) => {
       </div>
       <div className="row g-3">
         <div className="col-12 col-lg-4">
-          <div className="card h-100 p-4 border shadow-sm bg-white rounded-3 d-flex flex-column"><h3 className="small fw-bold text-uppercase text-secondary tracking-widest mb-4">Department Costs</h3>
+          <div className="card h-100 p-4 border shadow-sm bg-white rounded-3 d-flex flex-column"><h3 className="small fw-bold text-uppercase text-secondary tracking-widest mb-4">Department Costs (Gross)</h3>
             <div className="d-flex flex-column gap-3 flex-grow-1">
               {stats.sortedDepts.length === 0 ? <p className="small text-muted text-center my-4 fw-semibold">No data.</p> : stats.sortedDepts.map(([dept, cost], idx) => {
                 const pct = ((cost / (stats.sortedDepts[0][1] || 1)) * 100).toFixed(0);
@@ -968,19 +968,42 @@ const executePDFExport = () => {
   if (db.length === 0) { notify("No data to export", "error"); return; }
   try {
     const { jsPDF } = window.jspdf; const doc = new jsPDF();
-    let tBasic = 0, tDays = 0, tAdv = 0, tNet = 0; let tP = 0, tL = 0, tWO = 0, tH = 0, tPMiss = 0, tT = 0, tOT = 0;
+    let tBasic = 0, tDays = 0, tAdv = 0, tNet = 0, tGross = 0; let tP = 0, tL = 0, tWO = 0, tH = 0, tPMiss = 0, tT = 0, tOT = 0;
     const deptStats = {}; const newJoiners = [];
-    db.forEach(e => {
-      tBasic += (parseFloat(e.basicSalary) || 0); tDays += (parseFloat(e.workingDays) || 0); tAdv += (parseFloat(e.advance) || 0); tNet += (parseFloat(e.salaryToBePaid) || 0); 
-      tP += (parseFloat(e.pOnly) || 0); tL += (parseFloat(e.leave) || 0); tWO += (parseFloat(e.wo) || 0); tH += (parseFloat(e.half) || 0); tPMiss += (parseFloat(e.pMiss) || 0); tT += (parseFloat(e.tour) || 0); tOT += (parseFloat(e.otHrs) || 0);
+    
+    const sortedDb = [...db].sort((a, b) => {
+      const d1 = (a.dept || 'Uncategorized').toLowerCase();
+      const d2 = (b.dept || 'Uncategorized').toLowerCase();
+      return d1.localeCompare(d2);
+    });
+
+    sortedDb.forEach(e => {
+      tBasic += (parseFloat(e.basicSalary) || 0); 
+      tDays += (parseFloat(e.workingDays) || 0); 
+      tAdv += (parseFloat(e.advance) || 0); 
+      tNet += (parseFloat(e.salaryToBePaid) || 0); 
+      tGross += (parseFloat(e.actualMonthly) || 0);
+      
+      tP += (parseFloat(e.pOnly) || 0); 
+      tL += (parseFloat(e.leave) || 0); 
+      tWO += (parseFloat(e.wo) || 0); 
+      tH += (parseFloat(e.half) || 0); 
+      tPMiss += (parseFloat(e.pMiss) || 0); 
+      tT += (parseFloat(e.tour) || 0); 
+      tOT += (parseFloat(e.otHrs) || 0);
+      
       const dName = e.dept || 'Uncategorized';
       if (!deptStats[dName]) deptStats[dName] = { count: 0, cost: 0 };
-      deptStats[dName].count += 1; deptStats[dName].cost += (parseFloat(e.salaryToBePaid) || 0);
+      deptStats[dName].count += 1; 
+      deptStats[dName].cost += (parseFloat(e.actualMonthly) || 0);
+      
       if(e.joiningDate && e.joiningDate.trim() !== "") { newJoiners.push(e); }
     });
+    
     doc.setFont("helvetica", "bold"); doc.setFontSize(16); doc.setTextColor(15, 61, 129); doc.text("ARISE CONSTRUCTION EQUIPMENTS", 105, 15, { align: 'center' });
     doc.setFontSize(11); doc.setTextColor(60, 60, 60); doc.text(`Payroll & Attendance Verification Dashboard - ${activeConf.label.toUpperCase()}`, 105, 22, { align: 'center' });
     doc.setFillColor(235, 235, 235);
+    
     if (hideBasic) {
       doc.rect(35.5, 28, 43, 16, 'F'); doc.setFillColor(230, 240, 255); doc.rect(83.5, 28, 43, 16, 'F'); doc.setFillColor(235, 235, 235); doc.rect(131.5, 28, 43, 16, 'F');
       doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(80, 80, 80); doc.text("Total Working Days", 57, 34, { align: 'center' }); doc.text("Total Advance", 105, 34, { align: 'center' }); doc.text("Net Salary To Be Paid", 153, 34, { align: 'center' });
@@ -990,37 +1013,61 @@ const executePDFExport = () => {
       doc.setFont("helvetica", "normal"); doc.setFontSize(9); doc.setTextColor(80, 80, 80); doc.text("Total Basic Salary", 35.5, 34, { align: 'center' }); doc.text("Total Working Days", 81.5, 34, { align: 'center' }); doc.text("Total Advance", 127.5, 34, { align: 'center' }); doc.text("Net Salary To Be Paid", 173.5, 34, { align: 'center' });
       doc.setFont("helvetica", "bold"); doc.setFontSize(11); doc.setTextColor(15, 61, 129); doc.text(`Rs. ${Math.round(tBasic).toLocaleString()}`, 35.5, 41, { align: 'center' }); doc.text(`${tDays}`, 81.5, 41, { align: 'center' }); doc.setTextColor(180, 0, 0); doc.text(`Rs. ${Math.round(tAdv).toLocaleString()}`, 127.5, 41, { align: 'center' }); doc.setTextColor(0, 128, 0); doc.text(`Rs. ${Math.round(tNet).toLocaleString()}`, 173.5, 41, { align: 'center' });
     }
+    
     const head = [['S.No', 'Employee Name', 'Department']];
     if (!hideBasic) head[0].push('Basic\nSalary');
-    head[0].push('P', 'L', 'W/O', 'H', 'P?', 'T', 'Days', 'Hrs\n(OT)', 'Advance', 'Salary To Pay');
-    const tableData = db.map((e, index) => {
+    head[0].push('P', 'L', 'W/O', 'H', 'P?', 'T', 'Days', 'Hrs\n(OT)', 'Gross\nSalary', 'Advance', 'Salary To Pay');
+    
+    const tableData = sortedDb.map((e, index) => {
       const row = [ index + 1, e.name, e.dept || '-' ];
       if (!hideBasic) row.push(e.basicSalary ? `Rs. ${Math.round(parseFloat(e.basicSalary)).toLocaleString()}` : '-');
-      row.push(e.pOnly || '-', e.leave || '-', e.wo || '-', e.half || '-', e.pMiss || '-', e.tour || '-', e.workingDays || '-', e.otHrs || '-', e.advance ? `Rs. ${Math.round(parseFloat(e.advance)).toLocaleString()}` : '-', e.salaryToBePaid ? `Rs. ${Math.round(e.salaryToBePaid).toLocaleString()}` : '0');
+      row.push(e.pOnly || '-', e.leave || '-', e.wo || '-', e.half || '-', e.pMiss || '-', e.tour || '-', e.workingDays || '-', e.otHrs || '-');
+      row.push(e.actualMonthly ? `Rs. ${Math.round(parseFloat(e.actualMonthly)).toLocaleString()}` : '-');
+      row.push(e.advance ? `Rs. ${Math.round(parseFloat(e.advance)).toLocaleString()}` : '-');
+      row.push(e.salaryToBePaid ? `Rs. ${Math.round(e.salaryToBePaid).toLocaleString()}` : '0');
       return row;
     });
+    
     const grandTotalRow = ["", "GRAND TOTAL", ""];
     if (!hideBasic) grandTotalRow.push(`Rs. ${Math.round(tBasic).toLocaleString()}`);
-    grandTotalRow.push(tP || '-', tL || '-', tWO || '-', tH || '-', tPMiss || '-', tT || '-', tDays, tOT || '-', `Rs. ${Math.round(tAdv).toLocaleString()}`, `Rs. ${Math.round(tNet).toLocaleString()}`);
+    grandTotalRow.push(tP || '-', tL || '-', tWO || '-', tH || '-', tPMiss || '-', tT || '-', tDays, tOT || '-');
+    grandTotalRow.push(`Rs. ${Math.round(tGross).toLocaleString()}`, `Rs. ${Math.round(tAdv).toLocaleString()}`, `Rs. ${Math.round(tNet).toLocaleString()}`);
     tableData.push(grandTotalRow);
-    const advColIndex = hideBasic ? 11 : 12; const netColIndex = hideBasic ? 12 : 13;
+    
+    const grossColIndex = hideBasic ? 11 : 12; 
+    const advColIndex = hideBasic ? 12 : 13; 
+    const netColIndex = hideBasic ? 13 : 14;
+    
     doc.autoTable({
       startY: 48, head: head, body: tableData, theme: 'grid', headStyles: { fillColor: [15, 61, 129], textColor: [255, 255, 255], halign: 'center', valign: 'middle', fontSize: 8 }, styles: { fontSize: 7.5, cellPadding: 1.5, halign: 'center', valign: 'middle' }, columnStyles: { 1: { halign: 'left' }, 2: { halign: 'left' } },
       didParseCell: function (data) {
         const isLastRow = data.row.index === tableData.length - 1;
-        if (isLastRow && data.row.section === 'body') { data.cell.styles.fillColor = [225, 225, 225]; data.cell.styles.fontStyle = 'bold'; data.cell.styles.textColor = [0, 0, 0]; if (data.column.index === advColIndex) data.cell.styles.textColor = [180, 0, 0]; if (data.column.index === netColIndex) data.cell.styles.textColor = [0, 128, 0]; } 
-        else if (data.row.section === 'body') { if (data.column.index === advColIndex && data.cell.raw !== '-') data.cell.styles.textColor = [180, 0, 0]; if (data.column.index === netColIndex && data.cell.raw !== '-') { data.cell.styles.textColor = [0, 128, 0]; data.cell.styles.fontStyle = 'bold'; } }
+        if (isLastRow && data.row.section === 'body') { 
+          data.cell.styles.fillColor = [225, 225, 225]; 
+          data.cell.styles.fontStyle = 'bold'; 
+          data.cell.styles.textColor = [0, 0, 0]; 
+          if (data.column.index === advColIndex) data.cell.styles.textColor = [180, 0, 0]; 
+          if (data.column.index === netColIndex) data.cell.styles.textColor = [0, 128, 0]; 
+        } 
+        else if (data.row.section === 'body') { 
+          if (data.column.index === advColIndex && data.cell.raw !== '-') data.cell.styles.textColor = [180, 0, 0]; 
+          if (data.column.index === netColIndex && data.cell.raw !== '-') { data.cell.styles.textColor = [0, 128, 0]; data.cell.styles.fontStyle = 'bold'; } 
+        }
       }
     });
+    
     let currentY = doc.lastAutoTable.finalY + 10;
     const sortedDepts = Object.keys(deptStats).sort((a,b) => deptStats[b].cost - deptStats[a].cost);
-    sortedDepts.push('__GRAND_TOTAL__'); deptStats['__GRAND_TOTAL__'] = { count: db.length, cost: tNet };
+    sortedDepts.push('__GRAND_TOTAL__'); deptStats['__GRAND_TOTAL__'] = { count: sortedDb.length, cost: tGross };
+    
     const boxW = 58; const boxH = 12; const gapX = 4; const gapY = 4; const cols = 3; const rowsUsed = Math.ceil(sortedDepts.length / cols);
     if (currentY + (rowsUsed * (boxH + gapY)) + 20 > 280) { doc.addPage(); currentY = 20; }
-    doc.setFontSize(11); doc.setTextColor(15, 61, 129); doc.setFont("helvetica", "bold"); doc.text("Department Salary Summary", 14, currentY); currentY += 6;
+    
+    doc.setFontSize(11); doc.setTextColor(15, 61, 129); doc.setFont("helvetica", "bold"); doc.text("Department Salary Summary (Based on Gross)", 14, currentY); currentY += 6;
+    
     sortedDepts.forEach((d, i) => {
       const isTotal = d === '__GRAND_TOTAL__'; const x = 14 + (i % cols) * (boxW + gapX); const y = currentY + Math.floor(i / cols) * (boxH + gapY);
-      const count = deptStats[d].count; const cost = deptStats[d].cost; const pct = tNet > 0 ? ((cost / tNet) * 100).toFixed(1) : 0; const dName = isTotal ? "GRAND TOTAL" : (d.length > 16 ? d.substring(0, 16) + '...' : d);
+      const count = deptStats[d].count; const cost = deptStats[d].cost; const pct = tGross > 0 ? ((cost / tGross) * 100).toFixed(1) : 0; const dName = isTotal ? "GRAND TOTAL" : (d.length > 16 ? d.substring(0, 16) + '...' : d);
       if (isTotal) { doc.setFillColor(15, 61, 129); doc.setDrawColor(15, 61, 129); } else { doc.setFillColor(248, 250, 252); doc.setDrawColor(226, 232, 240); }
       doc.rect(x, y, boxW, boxH, 'FD'); doc.setFont("helvetica", "bold"); doc.setFontSize(8); doc.setTextColor(isTotal ? 255 : 40); doc.text(dName.toUpperCase(), x + 3, y + 5);
       doc.setFont("helvetica", "normal"); doc.setTextColor(isTotal ? 200 : 100); doc.text(`${count} Emp`, x + boxW - 3, y + 5, { align: 'right' });
@@ -1028,6 +1075,7 @@ const executePDFExport = () => {
       doc.setFont("helvetica", "bold"); doc.setFontSize(8); doc.setTextColor(isTotal ? 255 : 15, isTotal ? 255 : 61, isTotal ? 255 : 129); doc.text(`${pct}%`, x + boxW - 3, y + 9.5, { align: 'right' });
     });
     currentY += rowsUsed * (boxH + gapY) + 5;
+    
     if (newJoiners.length > 0) {
       if (currentY + 30 > 280) { doc.addPage(); currentY = 20; }
       doc.setFontSize(11); doc.setTextColor(15, 61, 129); doc.setFont("helvetica", "bold"); doc.text("New Joiners Report", 14, currentY);
@@ -1035,12 +1083,14 @@ const executePDFExport = () => {
       doc.autoTable({ startY: currentY + 4, head: [['S.No', 'Employee Name', 'Department', 'Joining Date', 'Basic Salary']], body: njBody, theme: 'grid', headStyles: { fillColor: [230, 240, 255], textColor: [15, 61, 129], fontStyle: 'bold', halign: 'center' }, styles: { fontSize: 8.5, halign: 'center', cellPadding: 2 }, columnStyles: { 1: { halign: 'left' }, 2: { halign: 'left' } } });
       currentY = doc.lastAutoTable.finalY + 10;
     }
+    
     let finalY = currentY + 10; if (finalY > 270) { doc.addPage(); finalY = 30; }
     doc.setFontSize(8); doc.setTextColor(0, 0, 0); doc.setLineWidth(0.5); doc.setDrawColor(0, 0, 0);
     doc.line(14, finalY, 54, finalY); doc.text("Prepared By", 34, finalY + 5, { align: 'center', fontStyle: 'bold' }); doc.text(pdfSigs.prep, 34, finalY + 9, { align: 'center' });
     doc.line(60, finalY, 100, finalY); doc.text("Rechecked By", 80, finalY + 5, { align: 'center', fontStyle: 'bold' }); doc.text(pdfSigs.rech, 80, finalY + 9, { align: 'center' });
     doc.line(106, finalY, 150, finalY); doc.text("Verified By", 128, finalY + 5, { align: 'center', fontStyle: 'bold' }); doc.text(pdfSigs.ver, 128, finalY + 9, { align: 'center' });
     doc.line(156, finalY, 196, finalY); doc.text("Final Approval", 176, finalY + 5, { align: 'center', fontStyle: 'bold' }); doc.text(pdfSigs.app, 176, finalY + 9, { align: 'center' });
+    
     doc.save(`Arise_Verification_${activeConf.short}.pdf`); notify("Verification PDF Exported successfully!", "success");
   } catch (err) { notify("Failed to export PDF.", "error"); }
 };
